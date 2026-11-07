@@ -95,11 +95,12 @@ say "Installing the application into $PREFIX/share/krbctl"
 rm -rf "$PREFIX/share/krbctl"
 mkdir -p "$PREFIX/share/krbctl"
 cp -a "$SRC_DIR/krbctl" "$PREFIX/share/krbctl/krbctl"
-# The runtime renders the launcher and tray icons from data/cerberus.png, so it
-# must ship. The preview sheet is a README illustration, not runtime data.
+# The tray icon is drawn at runtime, so the payload needs no image of its own.
+# The launcher icon set goes into the icon theme below instead, so drop the copy
+# that comes along with data/ to avoid installing it twice.
 rm -rf "$PREFIX/share/krbctl/krbctl/__pycache__"
 cp -a "$SRC_DIR/data" "$PREFIX/share/krbctl/data"
-rm -f "$PREFIX/share/krbctl/data/icons/preview-states.png"
+rm -rf "$PREFIX/share/krbctl/data/icons"
 # The .in templates are build inputs; installed entries are already generated.
 rm -f "$PREFIX/share/krbctl/data"/*.desktop.in
 

@@ -11,27 +11,21 @@ directly, so there is no GTK3/X11 dependency and no libappindicator.
 The icon is Cerberus — the three-headed dog who guards the gates, which is
 exactly what "Kerberos" means.
 
-In the **launcher** the artwork sits on a rounded slate plate: three heads above
-48 px, and the goofy left head alone below that, because in a square icon three
-heads get a third of the width each and turn into a grey blur.
+It appears in the **launcher** icon, which is a static PNG set under
+`data/icons/hicolor/` — nine sizes, committed, copied into place by `install.sh`.
+No image tooling is needed to install or run this.
 
-In the **tray** the state is carried by the plate behind the dog rather than by
-tinting it:
-
-![icon states](data/icons/preview-states.png)
+In the **tray**, the ticket state is a rounded plate in the state's colour:
 
 | green | amber | orange | red | faded |
 |---|---|---|---|---|
 | valid | expiring soon | cache unreadable | expired | no ticket |
 
-Tinting a detailed drawing at 22 px either flattens it to a silhouette (a
-shapeless blob) or washes the colour out until it is grey. A solid plate keeps
-the dog recognisable, reads the same on a light or a dark bar, and makes the
-state obvious at a glance — which is the whole job of a tray icon.
-
-Every icon is rendered from one PNG, `data/cerberus.png`, by `krbctl/icons.py`.
-The generated sizes under `data/icons/hicolor/` are committed, so installing
-needs no image tooling at all — `install.sh` copies them into place.
+A solid plate rather than a glyph, because at 22 px on a bar colour is the only
+thing that survives and the state is the whole message. The shape is identical
+for every state, so it reads as one indicator that changes hue rather than as
+five unrelated icons. It is drawn at runtime by `krbctl/icons.py` — a few dozen
+lines of cairo, no artwork and no files to load.
 
 ## Why it exists
 
@@ -167,13 +161,12 @@ krbctl/
 │   ├── config.py     # accounts.json, first-run auto-detect
 │   ├── secrets.py    # libsecret password storage
 │   ├── cli.py        # krbctl status/renew/destroy/doctor/...
-│   ├── icons.py      # renders every icon from the artwork
+│   ├── icons.py      # tray state plates, rendered at runtime
 │   ├── tray.py       # StatusNotifierItem + DBusMenu over Gio
 │   ├── window.py     # GTK4 / libadwaita window
 │   └── app.py        # poller, auto-renew, notifications
 ├── data/
-│   ├── cerberus.png       # the artwork, transparent background
-│   ├── icons/hicolor/     # icon set, one dir per size
+│   ├── icons/hicolor/     # launcher icon set, one dir per size
 │   ├── *.desktop.in       # desktop entry templates
 │   └── *.metainfo.xml     # AppStream metadata
 ├── tools/

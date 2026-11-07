@@ -1,51 +1,21 @@
-"""Icons for the tray, the window and the launcher.
+"""The tray icon and the status badges in the window.
 
-Two jobs, one picture:
+The ticket state is carried by colour: a rounded plate in the state's colour.
+Nothing is loaded from disk and nothing is drawn from artwork, so this module is
+size-independent and cannot break because a file went missing.
 
-* The **launcher** icon is the Cerberus artwork on a rounded slate plate. The dog
-  is the brand there, seen at 48 px and up, so detail is the point.
-* The **tray** icon is the same dog on a plate in the ticket-state colour. The
-  state cannot be carried by tinting the drawing: at 22 px that either flattens
-  it to a silhouette — a shapeless blob — or washes the colours out to grey. A
-  solid plate keeps the dog recognisable, reads the same on a light or a dark
-  bar, and makes the state obvious at a glance, which is the whole job.
-
-The artwork is a single PNG with a transparent background. Everything else here
-is sizing, cropping and colour.
+The launcher icon is separate and static — ``data/icons/hicolor/*/apps/krbctl.png``
+is installed by ``install.sh`` and looked up through the icon theme by name.
 """
 
 from __future__ import annotations
 
 import math
-from pathlib import Path
-from typing import Optional
 
 import cairo
 
-ARTWORK = Path(__file__).resolve().parent.parent / "data" / "cerberus.png"
-
-# Below this many pixels three heads side by side merge into a grey blur: in a
-# square icon each head only gets a third of the width, which no amount of
-# cropping fixes — measured by rendering the artwork, a top band of it, and a
-# single head, then looking at each at true size.
-ARTWORK_MIN = 48
-
-# How much of the slab the artwork may occupy, as a fraction of its edge.
-ARTWORK_INSET = 0.025
-
-# The left head — the goofy one with the tongue out — as a fraction of the
-# artwork. Used below ARTWORK_MIN, where one head reads and three do not. It is
-# a crop of the same drawing, so the icon keeps one style down to 16 px.
-HEAD_BOX = (0.000, 0.030, 0.400, 0.520)
-
-# The coloured plate behind the tray icon, and how much of the tray icon the dog
-# occupies on top of it. Both judged at true 22 px on a dark bar.
+# The coloured plate's inset from its own edge, as a fraction of the icon size.
 PLATE_INSET = 0.055
-PLATE_ART_INSET = 0.115
-
-# The launcher slab, top and bottom of its vertical gradient.
-SLAB_TOP = (0.247, 0.278, 0.345)
-SLAB_BOTTOM = (0.169, 0.192, 0.239)
 
 # Nord palette, matching the Noctalia bar and the desktop theme.
 STATE_COLORS = {
@@ -59,27 +29,10 @@ STATE_COLORS = {
     "error": (0.816, 0.529, 0.439),
 }
 
-# Alpha for "no ticket" — the dog stays visible but reads as inactive.
+# Alpha for "no ticket" — the plate stays visible but reads as inactive.
 STATE_ALPHA = {"none": 0.60}
 
-_ARTWORK_UNSET = object()
-_artwork: object = _ARTWORK_UNSET
 
-
-def artwork_surface() -> Optional[cairo.ImageSurface]:
-    """The Cerberus artwork, or ``None`` if it is not installed.
-
-    Cached because one tray refresh renders several icons and re-decoding the
-    PNG each time is wasteful.
-    """
-    global _artwork
-    if _artwork is not _ARTWORK_UNSET:
-        return _artwork
-    _artwork = cairo.ImageSurface.create_from_png(str(ARTWORK)) if ARTWORK.exists() else None
-    return _artwork
-
-
-# ── drawing helpers ──────────────────────────────────────────────────────────
 def _rounded_rect(
     cr: cairo.Context, x: float, y: float, width: float, height: float, radius: float
 ) -> None:
@@ -91,73 +44,28 @@ def _rounded_rect(
     cr.close_path()
 
 
-def _draw_plate(cr: cairo.Context, size: float, inset: float, color: tuple[float, float, float]) -> None:
-    """A flat rounded plate in the state colour."""
-    arm = size * inset
-    _rounded_rect(cr, arm, arm, size - 2 * arm, size - 2 * arm, (size - 2 * arm) * 0.30)
-    cr.set_source_rgb(*color)
-    cr.fill()
-
-
-def _draw_slab(cr: cairo.Context, size: float) -> None:
-    """The rounded slate plate the launcher icon sits on.
-
-    It exists because the artwork is drawn with near-black outlines: on a dark
-    launcher those would vanish without it, and on a light one the pale grey body
-    would.
-    """
-    _rounded_rect(cr, 0, 0, size, size, size * 0.22)
-    gradient = cairo.LinearGradient(0, 0, size * 0.35, size)
-    gradient.add_color_stop_rgb(0.0, *SLAB_TOP)
-    gradient.add_color_stop_rgb(1.0, *SLAB_BOTTOM)
-    cr.set_source(gradient)
-    cr.fill()
-
-
-def _draw_fitted(cr: cairo.Context, image: cairo.ImageSurface, size: int, inset_frac: float) -> None:
-    """Draw ``image`` centred in a ``size`` square, inset by a fraction of it.
-
-    Fits by the longer edge and keeps the aspect, so a wide composition is never
-    squashed and a tall crop is never stretched.
-    """
-    box = size - 2 * (size * inset_frac)
-    scale = min(box / image.get_width(), box / image.get_height())
-    drawn_w, drawn_h = image.get_width() * scale, image.get_height() * scale
-    cr.save()
-    cr.translate((size - drawn_w) / 2, (size - drawn_h) / 2)
-    cr.scale(scale, scale)
-    cr.set_source_surface(image, 0, 0)
-    cr.get_source().set_filter(cairo.FILTER_GOOD)
-    cr.paint()
-    cr.restore()
-
-
-def _head_crop(art: cairo.ImageSurface) -> cairo.ImageSurface:
-    """Just the left head, as its own surface."""
-    width, height = art.get_width(), art.get_height()
-    fx0, fy0, fx1, fy1 = HEAD_BOX
-    x0, y0 = int(fx0 * width), int(fy0 * height)
-    x1, y1 = int(fx1 * width), int(fy1 * height)
-    crop = cairo.ImageSurface(cairo.FORMAT_ARGB32, x1 - x0, y1 - y0)
-    cr = cairo.Context(crop)
-    cr.set_source_surface(art, -x0, -y0)
-    cr.paint()
-    crop.flush()
-    return crop
-
-
-# ── icons ────────────────────────────────────────────────────────────────────
 def surface_for_state(state: str, size: int = 22) -> cairo.ImageSurface:
-    """The tray icon for ``state``: the dog on a plate in the state colour."""
-    color = STATE_COLORS.get(state, STATE_COLORS["none"])
-    art = artwork_surface()
+    """A rounded plate in the colour for ``state``.
+
+    A solid plate rather than a glyph: at 22 px on a bar, colour is the only
+    thing that survives, and the state is the whole message. The shape is the
+    same for every state so the eye reads it as one indicator that changes hue,
+    not as five unrelated icons.
+    """
+    # Resolve once, so an unknown state is treated as "none" in every respect —
+    # colour *and* fade. Looking each up separately let an unknown state render
+    # at full alpha in the "no ticket" colour, which reads as a live ticket.
+    state = state if state in STATE_COLORS else "none"
+    color = STATE_COLORS[state]
 
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
     cr = cairo.Context(surface)
     cr.set_antialias(cairo.ANTIALIAS_BEST)
-    _draw_plate(cr, size, PLATE_INSET, color)
-    if art is not None:
-        _draw_fitted(cr, _head_crop(art), size, PLATE_ART_INSET)
+
+    arm = size * PLATE_INSET
+    _rounded_rect(cr, arm, arm, size - 2 * arm, size - 2 * arm, (size - 2 * arm) * 0.30)
+    cr.set_source_rgb(*color)
+    cr.fill()
     surface.flush()
 
     alpha = STATE_ALPHA.get(state)
@@ -172,31 +80,6 @@ def surface_for_state(state: str, size: int = 22) -> cairo.ImageSurface:
     return faded
 
 
-def app_icon_surface(size: int = 256) -> cairo.ImageSurface:
-    """Full-colour launcher icon: the artwork on the rounded slab.
-
-    Two compositions, because one cannot work at both ends of the size range:
-
-    * 48 px and up — the whole artwork, three heads, which is the joke.
-    * below 48 px — the left head alone. At a third of the width each, three
-      heads are a grey blur at 32 px; one head still reads.
-
-    Either way the art is fitted by its longest edge and centred.
-    """
-    art = artwork_surface()
-    image = None if art is None else (art if size >= ARTWORK_MIN else _head_crop(art))
-
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
-    cr = cairo.Context(surface)
-    cr.set_antialias(cairo.ANTIALIAS_BEST)
-    _draw_slab(cr, size)
-    if image is not None:
-        _draw_fitted(cr, image, size, ARTWORK_INSET)
-    surface.flush()
-    return surface
-
-
-# ── exports for GTK and for SNI ──────────────────────────────────────────────
 def _argb32_big_endian(surface: cairo.ImageSurface) -> bytes:
     """Cairo gives native-endian premultiplied ARGB32; SNI wants big-endian.
 
