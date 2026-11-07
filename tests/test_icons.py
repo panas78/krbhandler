@@ -2,10 +2,10 @@
 
 The failures worth guarding against are the silent ones:
 
-* an icon that renders as a solid blob, so the tray shows a featureless square;
+* an icon that renders as a flat block, so the tray shows a featureless square;
 * a wrong byte order, so a valid green ticket looks red;
 * the state colour silently not being applied, so the icon conveys nothing;
-* the artwork going missing and the icon quietly becoming something else.
+* the artwork going missing from the shipped payload.
 
 Cairo's ARGB32 is native-endian: on x86 the bytes per pixel are B, G, R, A, so
 alpha is byte 3 and colours must be read in reverse.
@@ -13,14 +13,10 @@ alpha is byte 3 and colours must be read in reverse.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import cairo
 import pytest
 
-from krbctl import icons, mascot
-
-ARTWORK = Path(icons.__file__).resolve().parent.parent / "data/icons/src/cerberus.png"
+from krbctl import icons
 
 
 def alpha_map(surface: cairo.ImageSurface) -> list[int]:
@@ -38,35 +34,46 @@ def pixel_at(surface: cairo.ImageSurface, x: int, y: int) -> tuple[int, int, int
     index = y * surface.get_stride() + x * 4
     b, g, r, a = data[index], data[index + 1], data[index + 2], data[index + 3]
     if a and a < 255:
-        r, g, b = (min(255, round(c * 255 / a)) for c in (r, g, b))
+        r = min(255, round(r * 255 / a))
+        g = min(255, round(g * 255 / a))
+        b = min(255, round(b * 255 / a))
     return r, g, b, a
 
 
+def distinct_colours(surface: cairo.ImageSurface) -> int:
+    data = bytes(surface.get_data())
+    stride = surface.get_stride()
+    return len(
+        {
+            (data[y * stride + x * 4], data[y * stride + x * 4 + 1], data[y * stride + x * 4 + 2])
+            for y in range(surface.get_height())
+            for x in range(surface.get_width())
+            if data[y * stride + x * 4 + 3] > 240
+        }
+    )
+
+
 class TestArtwork:
-    """The launcher icon's source file, and what it has to be."""
+    """The single PNG every icon is built from."""
 
     def test_artwork_is_present(self):
-        assert ARTWORK.exists(), "missing artwork: run tools/prepare-art.py"
+        """It ships in the payload and is what the icons render from."""
+        assert icons.ARTWORK.exists(), f"missing artwork: {icons.ARTWORK}"
 
     def test_artwork_has_transparency(self):
-        """prepare-art.py must have keyed the white background out.
-
-        Without this the launcher icon is a white square with a dog in it, and
-        the dark slab behind it is pointless.
-        """
-        art = cairo.ImageSurface.create_from_png(str(ARTWORK))
-        alphas = alpha_map(art)
-        transparent = sum(1 for value in alphas if value < 8)
-        assert transparent > len(alphas) * 0.10, "background was not keyed out"
+        """The background must be transparent, or the plate behind it is moot."""
+        art = icons.artwork_surface()
+        assert art is not None
+        transparent = sum(1 for value in alpha_map(art) if value < 8)
+        assert transparent > len(alpha_map(art)) * 0.10, "background is not transparent"
 
     def test_artwork_keeps_interior_whites(self):
-        """Keying must remove the background, not every white pixel.
+        """The teeth and eye highlights must survive; only the background went.
 
-        A luminance key would eat the teeth and the eye highlights and leave a
-        hollowed-out dog. The flood fill is what prevents that, so this asserts
-        that plenty of near-white survives inside the silhouette.
+        A luminance key would have eaten them and left a hollowed-out dog.
         """
-        art = cairo.ImageSurface.create_from_png(str(ARTWORK))
+        art = icons.artwork_surface()
+        assert art is not None
         data = bytes(art.get_data())
         stride = art.get_stride()
         bright = 0
@@ -75,7 +82,11 @@ class TestArtwork:
                 index = y * stride + x * 4
                 if data[index + 3] > 250 and min(data[index : index + 3]) > 200:
                     bright += 1
-        assert bright > 200, "no white detail survived — keying was too aggressive"
+        assert bright > 200, "no white detail survived — the artwork looks hollowed out"
+
+    def test_artwork_is_loaded_once(self):
+        """Re-decoding an 800 px PNG on every tray refresh would be wasteful."""
+        assert icons.artwork_surface() is icons.artwork_surface()
 
 
 class TestStateColours:
@@ -83,9 +94,9 @@ class TestStateColours:
     def test_state_colour_is_on_the_plate(self, state):
         """The plate behind the dog carries the state; sample it off-centre.
 
-        Sampling the icon's first opaque pixel is no longer meaningful — that is
-        now the dog, or an antialiased corner. The plate is the band between its
-        own inset and the artwork's.
+        Sampling the icon's first opaque pixel is not meaningful — that is the
+        dog, or an antialiased corner. The plate is the band between its own
+        inset and the artwork's.
         """
         size = 64
         surface = icons.surface_for_state(state, size)
@@ -123,34 +134,33 @@ class TestStateColours:
         surface = icons.surface_for_state("valid", size)
         assert (surface.get_width(), surface.get_height()) == (size, size)
 
-    def test_icon_is_not_a_featureless_blob(self):
+    def test_icon_is_not_a_flat_block(self):
         """The tray is a few pixels of colour: it only speaks because the plate
         and the dog differ from each other."""
-        surface = icons.surface_for_state("valid", 22)
-        data = bytes(surface.get_data())
-        stride = surface.get_stride()
-        opaque = {
-            tuple(data[y * stride + x * 4 : y * stride + x * 4 + 3])
-            for y in range(22)
-            for x in range(22)
-            if data[y * stride + x * 4 + 3] > 240
-        }
-        assert len(opaque) > 20, "the 22px icon is a single flat colour"
+        assert distinct_colours(icons.surface_for_state("valid", 22)) > 20
+
+    def test_plate_is_rounded(self):
+        """A square plate would read as a missing icon, not a badge."""
+        surface = icons.surface_for_state("valid", 32)
+        assert alpha_map(surface)[0] < 40, "top-left corner should be transparent"
 
 
-class TestArtworkFallback:
-    def test_tray_falls_back_to_the_drawn_face_without_artwork(self, monkeypatch):
-        """No artwork must degrade to something legible, not to a blank icon."""
+class TestMissingArtwork:
+    """A missing artwork file must not crash the tray."""
+
+    def test_tray_still_shows_the_state_colour(self, monkeypatch):
         monkeypatch.setattr(icons, "_artwork", None)
         surface = icons.surface_for_state("valid", 32)
-        assert ink_fraction(surface) > 0.25
+        assert surface.get_width() == 32
+        expected = tuple(round(c * 255) for c in icons.STATE_COLORS["valid"])
+        got = pixel_at(surface, 16, 4)[:3]
+        for value, want in zip(got, expected):
+            assert abs(value - want) <= 4
 
-    def test_launcher_falls_back_to_the_drawn_icon_without_artwork(self, monkeypatch):
+    def test_launcher_still_produces_a_square(self, monkeypatch):
         monkeypatch.setattr(icons, "_artwork", None)
         surface = icons.app_icon_surface(64)
         assert (surface.get_width(), surface.get_height()) == (64, 64)
-        alphas = alpha_map(surface)
-        assert sum(1 for value in alphas if value > 250) > len(alphas) * 0.5
 
 
 class TestTrayPixmap:
@@ -201,32 +211,33 @@ class TestAppIcon:
     def test_has_a_rounded_opaque_background(self):
         """The artwork has near-black outlines and would vanish on a dark
         launcher without the slab."""
-        surface = icons.app_icon_surface(64)
-        alphas = alpha_map(surface)
+        alphas = alpha_map(icons.app_icon_surface(64))
         opaque = sum(1 for value in alphas if value > 250)
         assert opaque > len(alphas) * 0.80
         assert opaque < len(alphas), "corners should be rounded, not square"
 
     def test_corner_is_transparent(self):
-        surface = icons.app_icon_surface(64)
-        assert alpha_map(surface)[0] == 0
+        assert alpha_map(icons.app_icon_surface(64))[0] == 0
 
     def test_small_sizes_use_one_head(self):
         """Three heads at a third of the width each is a grey blur below 48 px."""
         assert icons.ARTWORK_MIN >= 48
-        full = icons.artwork_surface()
-        assert full is not None
-        crop = icons._head_crop(full)
-        # The crop is a single head: roughly a third as wide as the artwork.
-        assert crop.get_width() < full.get_width() * 0.5
+        art = icons.artwork_surface()
+        assert art is not None
+        crop = icons._head_crop(art)
+        assert crop.get_width() < art.get_width() * 0.5
 
     def test_head_crop_is_within_the_artwork(self):
-        full = icons.artwork_surface()
-        assert full is not None
-        crop = icons._head_crop(full)
+        art = icons.artwork_surface()
+        assert art is not None
+        crop = icons._head_crop(art)
         assert crop.get_width() > 0 and crop.get_height() > 0
-        assert crop.get_width() <= full.get_width()
-        assert crop.get_height() <= full.get_height()
+        assert crop.get_width() <= art.get_width()
+        assert crop.get_height() <= art.get_height()
+
+    def test_icon_contains_the_dog(self):
+        """The slab alone would pass every geometry test above."""
+        assert distinct_colours(icons.app_icon_surface(128)) > 200
 
 
 class TestGdkPixbuf:
@@ -236,60 +247,3 @@ class TestGdkPixbuf:
         pixbuf = icons.gdk_pixbuf_for_state("valid", 22)
         assert pixbuf.get_width() == 22 and pixbuf.get_height() == 22
         assert pixbuf.get_has_alpha()
-
-
-class TestMaskFreedDrawing:
-    """The drawn face is still the fallback, so it must stay functional."""
-
-    @pytest.mark.parametrize("size", [22, 24, 32, 48, 128])
-    def test_face_is_not_a_solid_blob(self, size):
-        face = mascot.face_surface(size, monochrome=icons.STATE_COLORS["valid"])
-        fraction = ink_fraction(face)
-        assert 0.30 < fraction < 0.80, f"{size}px: ink covers {fraction:.0%}"
-
-    def test_face_has_transparent_holes_inside_the_silhouette(self):
-        size = 64
-        face = mascot.face_surface(size, monochrome=icons.STATE_COLORS["valid"])
-        alphas = alpha_map(face)
-
-        def at(x, y):
-            return alphas[y * size + x]
-
-        for label, (fx, fy) in {
-            "left eye": (0.292, 0.372),
-            "right eye": (0.708, 0.372),
-            "nose": (0.500, 0.545),
-        }.items():
-            x, y = int(fx * size), int(fy * size)
-            assert at(x, y) < 40, f"{label} is not punched out (alpha {at(x, y)})"
-
-        for label, (fx, fy) in {
-            "forehead": (0.500, 0.240),
-            "left cheek": (0.130, 0.480),
-            "right cheek": (0.870, 0.480),
-        }.items():
-            x, y = int(fx * size), int(fy * size)
-            assert at(x, y) > 200, f"{label} should be solid (alpha {at(x, y)})"
-
-    def test_eyes_are_mirrored(self):
-        size = 64
-        face = mascot.face_surface(size, monochrome=icons.STATE_COLORS["valid"])
-        alphas = alpha_map(face)
-        y = int(0.372 * size)
-
-        def find_hole_start(x_from, x_to, step):
-            for x in range(x_from, x_to, step):
-                if alphas[y * size + x] < 40:
-                    return x
-            return None
-
-        left = find_hole_start(0, size // 2, 1)
-        right = find_hole_start(size - 1, size // 2, -1)
-        assert left is not None and right is not None
-        assert abs(left - (size - 1 - right)) <= 2, "eyes are not symmetric"
-
-    def test_mouth_threshold_is_respected(self):
-        """Below MOUTH_MIN a mouth hole is a smudge, and the tongue follows it."""
-        assert mascot.MOUTH_MIN >= 26
-        small = mascot.face_surface(22, monochrome=(1.0, 1.0, 1.0))
-        assert len(alpha_map(small)) == 22 * 22

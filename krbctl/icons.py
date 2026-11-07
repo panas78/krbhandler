@@ -1,27 +1,28 @@
 """Icons for the tray, the window and the launcher.
 
-Two different jobs, so two different pictures:
+Two jobs, one picture:
 
-* The **launcher** icon is the full-colour Cerberus artwork on the slate slab.
-  There the dog is the brand, seen at 48 px and up, and detail is the point.
-* The **tray** icon is a drawn monochrome face, punched with holes for the eyes,
-  nose and mouth. At 22 px on a dark bar the artwork would be a grey smudge, and
-  the colour has to carry the ticket state — which is the entire reason a tray
-  icon exists. :mod:`krbctl.mascot` draws that face in code so it stays sharp at
-  every size.
+* The **launcher** icon is the Cerberus artwork on a rounded slate plate. The dog
+  is the brand there, seen at 48 px and up, so detail is the point.
+* The **tray** icon is the same dog on a plate in the ticket-state colour. The
+  state cannot be carried by tinting the drawing: at 22 px that either flattens
+  it to a silhouette — a shapeless blob — or washes the colours out to grey. A
+  solid plate keeps the dog recognisable, reads the same on a light or a dark
+  bar, and makes the state obvious at a glance, which is the whole job.
 
-So the artwork is for looking at, and the drawn face is for glancing at.
+The artwork is a single PNG with a transparent background. Everything else here
+is sizing, cropping and colour.
 """
 
 from __future__ import annotations
 
-import os
+import math
 from pathlib import Path
 from typing import Optional
 
 import cairo
 
-from . import mascot
+ARTWORK = Path(__file__).resolve().parent.parent / "data" / "cerberus.png"
 
 # Below this many pixels three heads side by side merge into a grey blur: in a
 # square icon each head only gets a third of the width, which no amount of
@@ -29,23 +30,22 @@ from . import mascot
 # single head, then looking at each at true size.
 ARTWORK_MIN = 48
 
-# How much of the slab the artwork may occupy, as a fraction of its edge. The
-# artwork already carries its own margin from prepare-art.py, so this is small.
+# How much of the slab the artwork may occupy, as a fraction of its edge.
 ARTWORK_INSET = 0.025
 
 # The left head — the goofy one with the tongue out — as a fraction of the
 # artwork. Used below ARTWORK_MIN, where one head reads and three do not. It is
-# a crop of the same drawing rather than the code-drawn face so the icon keeps
-# one style all the way down to 16 px.
+# a crop of the same drawing, so the icon keeps one style down to 16 px.
 HEAD_BOX = (0.000, 0.030, 0.400, 0.520)
 
-# The coloured plate behind the tray icon, and how much of the tray icon the
-# dog occupies on top of it. Both judged at true 22 px on a dark bar.
+# The coloured plate behind the tray icon, and how much of the tray icon the dog
+# occupies on top of it. Both judged at true 22 px on a dark bar.
 PLATE_INSET = 0.055
 PLATE_ART_INSET = 0.115
 
-_ARTWORK_UNSET = object()
-_artwork: object = _ARTWORK_UNSET
+# The launcher slab, top and bottom of its vertical gradient.
+SLAB_TOP = (0.247, 0.278, 0.345)
+SLAB_BOTTOM = (0.169, 0.192, 0.239)
 
 # Nord palette, matching the Noctalia bar and the desktop theme.
 STATE_COLORS = {
@@ -59,46 +59,144 @@ STATE_COLORS = {
     "error": (0.816, 0.529, 0.439),
 }
 
-# Alpha for "no ticket" — the face stays visible but reads as inactive.
+# Alpha for "no ticket" — the dog stays visible but reads as inactive.
 STATE_ALPHA = {"none": 0.60}
 
+_ARTWORK_UNSET = object()
+_artwork: object = _ARTWORK_UNSET
 
-def surface_for_state(state: str, size: int = 22) -> cairo.ImageSurface:
-    """The tray icon for ``state``: the dog on a plate in the state colour.
 
-    The state is carried by the plate rather than by tinting the dog. Tinting a
-    detailed drawing either flattens it to a silhouette — which at 22 px is a
-    shapeless blob — or washes the colours out until it is a grey smudge. A
-    solid plate behind the artwork keeps the dog recognisable, works on a light
-    or a dark bar alike, and makes the state obvious at a glance, which is the
-    whole job of this icon.
+def artwork_surface() -> Optional[cairo.ImageSurface]:
+    """The Cerberus artwork, or ``None`` if it is not installed.
+
+    Cached because one tray refresh renders several icons and re-decoding the
+    PNG each time is wasteful.
     """
+    global _artwork
+    if _artwork is not _ARTWORK_UNSET:
+        return _artwork
+    _artwork = cairo.ImageSurface.create_from_png(str(ARTWORK)) if ARTWORK.exists() else None
+    return _artwork
+
+
+# ── drawing helpers ──────────────────────────────────────────────────────────
+def _rounded_rect(
+    cr: cairo.Context, x: float, y: float, width: float, height: float, radius: float
+) -> None:
+    cr.new_sub_path()
+    cr.arc(x + width - radius, y + radius, radius, -math.pi / 2, 0)
+    cr.arc(x + width - radius, y + height - radius, radius, 0, math.pi / 2)
+    cr.arc(x + radius, y + height - radius, radius, math.pi / 2, math.pi)
+    cr.arc(x + radius, y + radius, radius, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
+def _draw_plate(cr: cairo.Context, size: float, inset: float, color: tuple[float, float, float]) -> None:
+    """A flat rounded plate in the state colour."""
+    arm = size * inset
+    _rounded_rect(cr, arm, arm, size - 2 * arm, size - 2 * arm, (size - 2 * arm) * 0.30)
+    cr.set_source_rgb(*color)
+    cr.fill()
+
+
+def _draw_slab(cr: cairo.Context, size: float) -> None:
+    """The rounded slate plate the launcher icon sits on.
+
+    It exists because the artwork is drawn with near-black outlines: on a dark
+    launcher those would vanish without it, and on a light one the pale grey body
+    would.
+    """
+    _rounded_rect(cr, 0, 0, size, size, size * 0.22)
+    gradient = cairo.LinearGradient(0, 0, size * 0.35, size)
+    gradient.add_color_stop_rgb(0.0, *SLAB_TOP)
+    gradient.add_color_stop_rgb(1.0, *SLAB_BOTTOM)
+    cr.set_source(gradient)
+    cr.fill()
+
+
+def _draw_fitted(cr: cairo.Context, image: cairo.ImageSurface, size: int, inset_frac: float) -> None:
+    """Draw ``image`` centred in a ``size`` square, inset by a fraction of it.
+
+    Fits by the longer edge and keeps the aspect, so a wide composition is never
+    squashed and a tall crop is never stretched.
+    """
+    box = size - 2 * (size * inset_frac)
+    scale = min(box / image.get_width(), box / image.get_height())
+    drawn_w, drawn_h = image.get_width() * scale, image.get_height() * scale
+    cr.save()
+    cr.translate((size - drawn_w) / 2, (size - drawn_h) / 2)
+    cr.scale(scale, scale)
+    cr.set_source_surface(image, 0, 0)
+    cr.get_source().set_filter(cairo.FILTER_GOOD)
+    cr.paint()
+    cr.restore()
+
+
+def _head_crop(art: cairo.ImageSurface) -> cairo.ImageSurface:
+    """Just the left head, as its own surface."""
+    width, height = art.get_width(), art.get_height()
+    fx0, fy0, fx1, fy1 = HEAD_BOX
+    x0, y0 = int(fx0 * width), int(fy0 * height)
+    x1, y1 = int(fx1 * width), int(fy1 * height)
+    crop = cairo.ImageSurface(cairo.FORMAT_ARGB32, x1 - x0, y1 - y0)
+    cr = cairo.Context(crop)
+    cr.set_source_surface(art, -x0, -y0)
+    cr.paint()
+    crop.flush()
+    return crop
+
+
+# ── icons ────────────────────────────────────────────────────────────────────
+def surface_for_state(state: str, size: int = 22) -> cairo.ImageSurface:
+    """The tray icon for ``state``: the dog on a plate in the state colour."""
     color = STATE_COLORS.get(state, STATE_COLORS["none"])
     art = artwork_surface()
 
-    if art is None:  # no artwork installed: fall back to the drawn face
-        face = mascot.face_surface(size, monochrome=color)
-    else:
-        face = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
-        cr = cairo.Context(face)
-        cr.set_antialias(cairo.ANTIALIAS_BEST)
-
-        arm = size * PLATE_INSET
-        mascot.draw_plate(cr, arm, arm, size - 2 * arm, size - 2 * arm, color)
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surface)
+    cr.set_antialias(cairo.ANTIALIAS_BEST)
+    _draw_plate(cr, size, PLATE_INSET, color)
+    if art is not None:
         _draw_fitted(cr, _head_crop(art), size, PLATE_ART_INSET)
+    surface.flush()
 
     alpha = STATE_ALPHA.get(state)
     if alpha is None:
-        return face
+        return surface
 
     faded = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
     cr = cairo.Context(faded)
-    cr.set_source_surface(face, 0, 0)
+    cr.set_source_surface(surface, 0, 0)
     cr.paint_with_alpha(alpha)
     faded.flush()
     return faded
 
 
+def app_icon_surface(size: int = 256) -> cairo.ImageSurface:
+    """Full-colour launcher icon: the artwork on the rounded slab.
+
+    Two compositions, because one cannot work at both ends of the size range:
+
+    * 48 px and up — the whole artwork, three heads, which is the joke.
+    * below 48 px — the left head alone. At a third of the width each, three
+      heads are a grey blur at 32 px; one head still reads.
+
+    Either way the art is fitted by its longest edge and centred.
+    """
+    art = artwork_surface()
+    image = None if art is None else (art if size >= ARTWORK_MIN else _head_crop(art))
+
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surface)
+    cr.set_antialias(cairo.ANTIALIAS_BEST)
+    _draw_slab(cr, size)
+    if image is not None:
+        _draw_fitted(cr, image, size, ARTWORK_INSET)
+    surface.flush()
+    return surface
+
+
+# ── exports for GTK and for SNI ──────────────────────────────────────────────
 def _argb32_big_endian(surface: cairo.ImageSurface) -> bytes:
     """Cairo gives native-endian premultiplied ARGB32; SNI wants big-endian.
 
@@ -159,141 +257,3 @@ def gdk_pixbuf_for_state(state: str, size: int = 22):
         size,
         size * 4,
     )
-
-
-def artwork_surface() -> Optional[cairo.ImageSurface]:
-    """The prepared Cerberus artwork, or ``None`` if it is not installed.
-
-    ``tools/prepare-art.py`` keys the white background out and crops it; this
-    loads the result. Cached because the icon set renders nine sizes in a row
-    and decoding an 800 px PNG nine times is wasteful.
-    """
-    global _artwork
-    if _artwork is not _ARTWORK_UNSET:
-        return _artwork
-    root = Path(__file__).resolve().parent.parent
-    path = root / "data" / "icons" / "src" / "cerberus.png"
-    _artwork = cairo.ImageSurface.create_from_png(str(path)) if path.exists() else None
-    return _artwork
-
-
-def _draw_fitted(
-    cr: cairo.Context,
-    image: cairo.ImageSurface,
-    size: int,
-    inset_frac: float,
-) -> None:
-    """Draw ``image`` centred in a ``size`` square, inset by a fraction of it.
-
-    Fits by the longer edge and keeps the aspect, so a wide composition is never
-    squashed and a tall crop is never stretched.
-    """
-    box = size - 2 * (size * inset_frac)
-    scale = min(box / image.get_width(), box / image.get_height())
-    drawn_w, drawn_h = image.get_width() * scale, image.get_height() * scale
-    cr.save()
-    cr.translate((size - drawn_w) / 2, (size - drawn_h) / 2)
-    cr.scale(scale, scale)
-    cr.set_source_surface(image, 0, 0)
-    cr.get_source().set_filter(cairo.FILTER_GOOD)
-    cr.paint()
-    cr.restore()
-
-
-def _head_crop(art: cairo.ImageSurface) -> cairo.ImageSurface:
-    """Just the left head, as its own surface."""
-    width, height = art.get_width(), art.get_height()
-    fx0, fy0, fx1, fy1 = HEAD_BOX
-    x0, y0 = int(fx0 * width), int(fy0 * height)
-    x1, y1 = int(fx1 * width), int(fy1 * height)
-    crop = cairo.ImageSurface(cairo.FORMAT_ARGB32, x1 - x0, y1 - y0)
-    cr = cairo.Context(crop)
-    cr.set_source_surface(art, -x0, -y0)
-    cr.paint()
-    crop.flush()
-    return crop
-
-
-def app_icon_surface(size: int = 256) -> cairo.ImageSurface:
-    """Full-colour launcher icon: the artwork on the rounded slab.
-
-    Two compositions, because one cannot work at both ends of the size range:
-
-    * 48 px and up — the whole artwork, three heads, which is the joke.
-    * below 48 px — the left head alone, cropped from the same drawing. At a
-      third of the width each, three heads are a grey blur at 32 px; one head
-      still reads, and cropping rather than redrawing keeps the style identical.
-
-    Either way the art is fitted by its longest edge and centred.
-    """
-    art = artwork_surface()
-    if art is None:
-        return mascot.app_icon_surface(size)  # no artwork installed
-
-    image = art if size >= ARTWORK_MIN else _head_crop(art)
-
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
-    cr = cairo.Context(surface)
-    cr.set_antialias(cairo.ANTIALIAS_BEST)
-    mascot.draw_slab(cr, size)
-
-    _draw_fitted(cr, image, size, ARTWORK_INSET)
-    surface.flush()
-    return surface
-
-
-def write_png(path: str, size: int = 256, state: str = "valid", *, app_icon: bool = True) -> str:
-    """Render an icon PNG. Used by tools/make-icons.py, not at runtime."""
-    surface = app_icon_surface(size) if app_icon else surface_for_state(state, size)
-    directory = os.path.dirname(os.path.abspath(path))
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    surface.write_to_png(path)
-    return path
-
-
-def preview_sheet(path: str) -> str:
-    """Every state at true tray size plus the launcher icon, for eyeballing.
-
-    Tray icons are drawn at 22 px and shown at 4x: judging them at any other
-    size is how you end up shipping something that looks fine here and is mud
-    in the bar.
-    """
-    pad, zoom = 18, 4
-    cell = 22
-    big = cell * zoom
-    states = tuple(STATE_COLORS)
-    width = pad + (len(states) + 1) * (big + pad)
-    height = big + 2 * pad + 26
-
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-    cr = cairo.Context(surface)
-    cr.set_source_rgb(0.13, 0.14, 0.18)  # a dark bar, to judge real contrast
-    cr.paint()
-    cr.select_font_face("sans")
-    cr.set_font_size(13)
-
-    def label(text: str, x: int) -> None:
-        cr.set_source_rgb(0.85, 0.87, 0.91)
-        cr.move_to(x, pad + big + 18)
-        cr.show_text(text)
-
-    for index, state in enumerate(states):
-        face = surface_for_state(state, cell)
-        x = pad + index * (big + pad)
-        cr.save()
-        cr.translate(x, pad)
-        cr.scale(zoom, zoom)
-        cr.set_source_surface(face, 0, 0)
-        cr.paint()
-        cr.restore()
-        label(state, x)
-
-    x = pad + len(states) * (big + pad)
-    cr.set_source_surface(app_icon_surface(big), x, pad)
-    cr.paint()
-    label("launcher", x)
-
-    surface.write_to_png(path)
-    return path
-

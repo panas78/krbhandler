@@ -95,13 +95,11 @@ say "Installing the application into $PREFIX/share/krbctl"
 rm -rf "$PREFIX/share/krbctl"
 mkdir -p "$PREFIX/share/krbctl"
 cp -a "$SRC_DIR/krbctl" "$PREFIX/share/krbctl/krbctl"
-# The runtime renders the launcher and tray icons from the keyed artwork, so
-# data/icons/src/cerberus.png must ship. The raw download and the generated
-# preview sheet must not: one is a build input, the other is a dev artefact.
+# The runtime renders the launcher and tray icons from data/cerberus.png, so it
+# must ship. The preview sheet is a README illustration, not runtime data.
 rm -rf "$PREFIX/share/krbctl/krbctl/__pycache__"
 cp -a "$SRC_DIR/data" "$PREFIX/share/krbctl/data"
 rm -f "$PREFIX/share/krbctl/data/icons/preview-states.png"
-rm -f "$PREFIX/share/krbctl/data/icons/src/cerberus-raw.png"
 # The .in templates are build inputs; installed entries are already generated.
 rm -f "$PREFIX/share/krbctl/data"/*.desktop.in
 
@@ -128,7 +126,7 @@ for size in 16 22 24 32 48 64 128 256 512; do
   installed_icons=$((installed_icons + 1))
 done
 if [ "$installed_icons" -eq 0 ]; then
-  warn "No icon PNGs found in data/icons/hicolor — run tools/make-icons.py first"
+  warn "No icon PNGs found in data/icons/hicolor — the icon set is missing from the source tree"
 else
   echo "    $installed_icons sizes"
 fi

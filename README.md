@@ -29,8 +29,9 @@ shapeless blob) or washes the colour out until it is grey. A solid plate keeps
 the dog recognisable, reads the same on a light or a dark bar, and makes the
 state obvious at a glance — which is the whole job of a tray icon.
 
-`krbctl/mascot.py` still draws a face in cairo, but only as the fallback used
-when the artwork is not installed; it is why the app works from a bare checkout.
+Every icon is rendered from one PNG, `data/cerberus.png`, by `krbctl/icons.py`.
+The generated sizes under `data/icons/hicolor/` are committed, so installing
+needs no image tooling at all — `install.sh` copies them into place.
 
 ## Why it exists
 
@@ -166,19 +167,16 @@ krbctl/
 │   ├── config.py     # accounts.json, first-run auto-detect
 │   ├── secrets.py    # libsecret password storage
 │   ├── cli.py        # krbctl status/renew/destroy/doctor/...
-│   ├── icons.py      # tray + launcher icons (artwork on plates/slab)
-│   ├── mascot.py     # cairo-drawn fallback face, shared plate drawing
+│   ├── icons.py      # renders every icon from the artwork
 │   ├── tray.py       # StatusNotifierItem + DBusMenu over Gio
 │   ├── window.py     # GTK4 / libadwaita window
 │   └── app.py        # poller, auto-renew, notifications
 ├── data/
-│   ├── icons/src/         # the Cerberus artwork: raw input + keyed version
-│   ├── icons/hicolor/     # generated PNG icon set, one dir per size
+│   ├── cerberus.png       # the artwork, transparent background
+│   ├── icons/hicolor/     # icon set, one dir per size
 │   ├── *.desktop.in       # desktop entry templates
 │   └── *.metainfo.xml     # AppStream metadata
 ├── tools/
-│   ├── prepare-art.py     # keys the white background out of the artwork
-│   ├── make-icons.py      # regenerates the icon set + preview sheet
 │   └── tray-probe.py      # isolates tray/D-Bus problems
 ├── tests/                 # parsing + classification, no KDC needed
 └── install.sh
