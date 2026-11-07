@@ -45,7 +45,7 @@ if [ "$DO_UNINSTALL" -eq 1 ]; then
   rm -f "$BINDIR/krbctl"
   # Remove every size of the icon set that was installed.
   for size in 16 22 24 32 48 64 128 256 512; do
-    rm -f "$ICONS/${size}x${size}/apps/krbctl.png" "$ICONS/${size}x${size}/apps/krbctl-symbolic.png"
+    rm -f "$ICONS/${size}x${size}/apps/krbctl.png"
     rmdir "$ICONS/${size}x${size}/apps" "$ICONS/${size}x${size}" 2>/dev/null || true
   done
   command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -qtf "$ICONS" 2>/dev/null || true
