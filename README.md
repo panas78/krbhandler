@@ -46,7 +46,7 @@ That is this app.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/krbctl.git
+git clone https://github.com/panas78/krbhandler.git
 cd krbctl
 ./install.sh
 ```
