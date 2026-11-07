@@ -112,9 +112,9 @@ branch on it.
   "count": 1,
   "accounts": [
     {
-      "id": "pperivolaris-diastasys-gr",
-      "label": "DIASTASYS.GR",
-      "principal": "pperivolaris@DIASTASYS.GR",
+      "id": "account1",
+      "label": "MYDOMAIN.COM",
+      "principal": "myusername@MYDOMAIN.COM",
       "state": "valid",
       "badge": "9h59m",
       "detail": "Expires Sun 08 Nov 01:19 · renewable until Sat 14 Nov 15:19",

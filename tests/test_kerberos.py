@@ -19,12 +19,12 @@ import pytest
 from krbctl import kerberos
 
 VALID_OUTPUT = """Ticket cache: KCM:1000
-Default principal: pperivolaris@DIASTASYS.GR
+Default principal: myusername@MYDOMAIN.COM
 
 Valid starting       Expires              Service principal
-11/07/2026 15:02:49  11/08/2026 01:02:49  krbtgt/DIASTASYS.GR@DIASTASYS.GR
+11/07/2026 15:02:49  11/08/2026 01:02:49  krbtgt/MYDOMAIN.COM@MYDOMAIN.COM
 \trenew until 11/14/2026 15:02:49
-11/07/2026 15:03:10  11/08/2026 01:02:49  HTTP/dc01.diastasys.gr@DIASTASYS.GR
+11/07/2026 15:03:10  11/08/2026 01:02:49  HTTP/dc01.mydomain.com@MYDOMAIN.COM
 """
 
 MULTI_LINE = """Ticket cache: FILE:/tmp/krb5cc_1000
@@ -42,7 +42,7 @@ class TestParseKlist:
     def test_reads_principal_and_cache(self):
         ticket = kerberos.parse_klist(VALID_OUTPUT)
         assert ticket is not None
-        assert ticket.principal == "pperivolaris@DIASTASYS.GR"
+        assert ticket.principal == "myusername@MYDOMAIN.COM"
         assert ticket.cache == "KCM:1000"
 
     def test_takes_the_tgt_expiry_not_the_service_ticket(self):

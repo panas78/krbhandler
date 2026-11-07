@@ -9,7 +9,7 @@ description = "Kerberos ticket manager with a tray icon and a GTK4 window"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Panagiotis Perivolaris", email = "p.perivolaris@diastasys.gr" }]
+authors = [{ name = "Pan", email = "panas78@gmail.com" }]
 keywords = ["kerberos", "krb5", "kinit", "tray", "gtk4", "libadwaita"]
 classifiers = [
   "Environment :: X11 Applications :: GTK",
