@@ -95,13 +95,12 @@ say "Installing the application into $PREFIX/share/krbctl"
 rm -rf "$PREFIX/share/krbctl"
 mkdir -p "$PREFIX/share/krbctl"
 cp -a "$SRC_DIR/krbctl" "$PREFIX/share/krbctl/krbctl"
-# The runtime needs the artwork (data/icons/src/cerberus.png) because the tray
-# is rendered from it, but not the raw download, the preview sheet, or any
-# __pycache__ the source tree happens to have.
+# The mascot is cairo code, so the runtime needs no artwork file. Drop the
+# generated preview sheet, the desktop-entry templates and any __pycache__ the
+# source tree happens to have.
 rm -rf "$PREFIX/share/krbctl/krbctl/__pycache__"
 cp -a "$SRC_DIR/data" "$PREFIX/share/krbctl/data"
 rm -f "$PREFIX/share/krbctl/data/icons/preview-states.png"
-rm -f "$PREFIX/share/krbctl/data/icons/src/cerberus-original.png"
 # The .in templates are build inputs; installed entries are already generated.
 rm -f "$PREFIX/share/krbctl/data"/*.desktop.in
 

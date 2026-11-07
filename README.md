@@ -9,13 +9,23 @@ extension. It speaks `org.kde.StatusNotifierItem` + `com.canonical.dbusmenu`
 directly, so there is no GTK3/X11 dependency and no libappindicator.
 
 The icon is Cerberus — the three-headed dog who guards the gates, which is
-exactly what "Kerberos" means. The silhouette is tinted by ticket state:
+exactly what "Kerberos" means. It is drawn in cairo (`krbctl/mascot.py`), not
+shipped as an image: one description of the face drives the tray, the window and
+the launcher, it stays sharp at 16 px and 512 px, and there is no artwork file
+to lose or license.
+
+In the tray the face is a single-colour silhouette punched with holes for the
+eyes, nose and mouth — the colour then carries the ticket state:
 
 ![icon states](data/icons/preview-states.png)
 
-| green | amber | red | grey |
-|---|---|---|---|
-| ticket valid | expiring soon | expired / error | no ticket |
+| green | amber | orange | red | faded |
+|---|---|---|---|---|
+| valid | expiring soon | cache unreadable | expired | no ticket |
+
+At 22 px the tray drops the finer features (pupils, teeth, the mouth opening)
+because a one-pixel detail is mud. The launcher icon keeps everything, and shows
+three heads — or one below 32 px, where three would be a smudge.
 
 ## Why it exists
 
@@ -156,12 +166,10 @@ krbctl/
 │   ├── window.py     # GTK4 / libadwaita window
 │   └── app.py        # poller, auto-renew, notifications
 ├── data/
-│   ├── icons/src/         # Cerberus artwork (alpha silhouette)
 │   ├── icons/hicolor/     # generated PNG icon set, one dir per size
 │   ├── *.desktop.in       # desktop entry templates
 │   └── *.metainfo.xml     # AppStream metadata
 ├── tools/
-│   ├── prepare-art.py     # keys the background out of the raw artwork
 │   ├── make-icons.py      # regenerates the icon set + preview sheet
 │   └── tray-probe.py      # isolates tray/D-Bus problems
 ├── tests/                 # parsing + classification, no KDC needed

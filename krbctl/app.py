@@ -22,7 +22,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gio", "2.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import config, kerberos, secrets  # noqa: E402
+from . import config, kerberos  # noqa: E402
 from .config import METHOD_KEYTAB, Account  # noqa: E402
 from .tray import MenuItem, Tray  # noqa: E402
 from .window import MainWindow, run_async  # noqa: E402
