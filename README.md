@@ -9,13 +9,14 @@ extension. It speaks `org.kde.StatusNotifierItem` + `com.canonical.dbusmenu`
 directly, so there is no GTK3/X11 dependency and no libappindicator.
 
 The icon is Cerberus — the three-headed dog who guards the gates, which is
-exactly what "Kerberos" means. It is drawn in cairo (`krbctl/mascot.py`), not
-shipped as an image: one description of the face drives the tray, the window and
-the launcher, it stays sharp at 16 px and 512 px, and there is no artwork file
-to lose or license.
+exactly what "Kerberos" means.
 
-In the tray the face is a single-colour silhouette punched with holes for the
-eyes, nose and mouth — the colour then carries the ticket state:
+In the **launcher** the artwork sits on a rounded slate plate: three heads above
+48 px, and the goofy left head alone below that, because in a square icon three
+heads get a third of the width each and turn into a grey blur.
+
+In the **tray** the state is carried by the plate behind the dog rather than by
+tinting it:
 
 ![icon states](data/icons/preview-states.png)
 
@@ -23,9 +24,13 @@ eyes, nose and mouth — the colour then carries the ticket state:
 |---|---|---|---|---|
 | valid | expiring soon | cache unreadable | expired | no ticket |
 
-At 22 px the tray drops the finer features (pupils, teeth, the mouth opening)
-because a one-pixel detail is mud. The launcher icon keeps everything, and shows
-three heads — or one below 32 px, where three would be a smudge.
+Tinting a detailed drawing at 22 px either flattens it to a silhouette (a
+shapeless blob) or washes the colour out until it is grey. A solid plate keeps
+the dog recognisable, reads the same on a light or a dark bar, and makes the
+state obvious at a glance — which is the whole job of a tray icon.
+
+`krbctl/mascot.py` still draws a face in cairo, but only as the fallback used
+when the artwork is not installed; it is why the app works from a bare checkout.
 
 ## Why it exists
 
@@ -161,15 +166,18 @@ krbctl/
 │   ├── config.py     # accounts.json, first-run auto-detect
 │   ├── secrets.py    # libsecret password storage
 │   ├── cli.py        # krbctl status/renew/destroy/doctor/...
-│   ├── icons.py      # cairo-drawn key icons (no image assets)
+│   ├── icons.py      # tray + launcher icons (artwork on plates/slab)
+│   ├── mascot.py     # cairo-drawn fallback face, shared plate drawing
 │   ├── tray.py       # StatusNotifierItem + DBusMenu over Gio
 │   ├── window.py     # GTK4 / libadwaita window
 │   └── app.py        # poller, auto-renew, notifications
 ├── data/
+│   ├── icons/src/         # the Cerberus artwork: raw input + keyed version
 │   ├── icons/hicolor/     # generated PNG icon set, one dir per size
 │   ├── *.desktop.in       # desktop entry templates
 │   └── *.metainfo.xml     # AppStream metadata
 ├── tools/
+│   ├── prepare-art.py     # keys the white background out of the artwork
 │   ├── make-icons.py      # regenerates the icon set + preview sheet
 │   └── tray-probe.py      # isolates tray/D-Bus problems
 ├── tests/                 # parsing + classification, no KDC needed

@@ -29,7 +29,6 @@ import cairo
 # Full colour, matching the warm greys of the reference art.
 FULL = {
     "fill": (0.678, 0.631, 0.596),  # warm grey body
-    "temple": (0.596, 0.549, 0.518),  # slightly darker where the skull rounds
     "stroke": (0.043, 0.031, 0.027),  # near-black outline
     "muzzle": (0.753, 0.710, 0.675),  # a shade lighter than the skull
     "nose": (0.318, 0.227, 0.204),  # dark brown
@@ -50,12 +49,14 @@ STROKE = 0.030  # outline weight in unit terms — bold, like the reference
 DETAIL_FULL = 3
 DETAIL_SMALL = 1
 
-# Below this many pixels the mouth opening collapses into a dark smear under
-# the nose and reads as dirt rather than a grin.
+# Below this the mouth opening is a dark smear under the nose rather than a
+# grin. The tongue is drawn only with the mouth: a tongue with no mouth to come
+# out of is a red drip hanging off the chin, which is exactly what the small
+# launcher sizes showed.
 MOUTH_MIN = 26
 
 
-def _detail_for(size: int) -> int:
+def _detail_for(size: float) -> int:
     if size >= 96:
         return DETAIL_FULL
     if size >= 48:
@@ -126,11 +127,37 @@ def _nose(cr: cairo.Context) -> None:
     cr.close_path()
 
 
+# Mouth geometry, stated as the edges the shape actually reaches.
+#
+# A cubic bezier only touches its control points' neighbourhood: with corners at
+# CORNER_Y and both controls at C, the curve's midpoint lands at
+# (8 * mid - 2 * corner) / 6, never at C. Specifying the mouth by its *edges*
+# and deriving the controls means the teeth can be placed against the real
+# opening. The earlier bug was exactly this: the teeth were positioned against
+# control-point values the curve never reached, so the upper row sat on the
+# muzzle and the lower row on the chin.
+MOUTH_LEFT = 0.348
+MOUTH_RIGHT = 0.652
+MOUTH_CORNER_Y = 0.664  # where the lips meet, at each corner
+MOUTH_TOP_EDGE = 0.694  # true highest point of the opening, at the middle
+MOUTH_BOTTOM_EDGE = 0.826  # true lowest point, at the middle
+
+
+def _control_y(edge_y: float) -> float:
+    """Control-point y that makes the bezier actually reach ``edge_y``.
+
+    Solving ``edge = (corner + 3c + 3c + corner) / 8`` for ``c``.
+    """
+    return (8 * edge_y - 2 * MOUTH_CORNER_Y) / 6
+
+
 def _mouth(cr: cairo.Context) -> None:
     """A wide open grin: a smile arc across the top, a heavy jaw underneath."""
-    cr.move_to(0.352, 0.672)
-    cr.curve_to(0.420, 0.726, 0.580, 0.726, 0.648, 0.672)
-    cr.curve_to(0.632, 0.800, 0.368, 0.800, 0.352, 0.672)
+    top = _control_y(MOUTH_TOP_EDGE)
+    bottom = _control_y(MOUTH_BOTTOM_EDGE)
+    cr.move_to(MOUTH_LEFT, MOUTH_CORNER_Y)
+    cr.curve_to(0.420, top, 0.580, top, MOUTH_RIGHT, MOUTH_CORNER_Y)
+    cr.curve_to(0.628, bottom, 0.372, bottom, MOUTH_LEFT, MOUTH_CORNER_Y)
     cr.close_path()
 
 
@@ -140,27 +167,42 @@ def _tongue(cr: cairo.Context) -> None:
     Deliberately off-centre: a symmetric tongue reads as a beard, while an
     asymmetric one reads as a dopey dog.
     """
-    cr.move_to(0.432, 0.756)
-    cr.curve_to(0.392, 0.862, 0.404, 0.948, 0.456, 0.962)
-    cr.curve_to(0.512, 0.976, 0.544, 0.902, 0.540, 0.786)
-    cr.curve_to(0.508, 0.774, 0.468, 0.768, 0.432, 0.756)
+    cr.move_to(0.378, 0.752)
+    cr.curve_to(0.338, 0.858, 0.350, 0.944, 0.402, 0.958)
+    cr.curve_to(0.458, 0.972, 0.490, 0.898, 0.486, 0.782)
+    cr.curve_to(0.454, 0.770, 0.414, 0.764, 0.378, 0.752)
     cr.close_path()
 
 
-def _teeth(cr: cairo.Context, row: str) -> None:
-    """Two white triangles per row — enough to say "grinning", no more."""
-    if row == "top":
-        for centre in (0.400, 0.500, 0.600):
-            cr.move_to(centre - 0.048, 0.686)
-            cr.line_to(centre + 0.048, 0.686)
-            cr.line_to(centre, 0.752 - abs(centre - 0.500) * 0.34)
-            cr.close_path()
-    else:
-        for centre in (0.440, 0.560):
-            cr.move_to(centre - 0.040, 0.788)
-            cr.line_to(centre + 0.040, 0.788)
-            cr.line_to(centre, 0.730)
-            cr.close_path()
+def _teeth(cr: cairo.Context) -> None:
+    """Both rows of teeth, as oversized triangles reaching past the lips.
+
+    Drawing them larger than the opening and letting the caller clip is the
+    whole point: their wide base is trimmed by the lip curve, so each tooth
+    emerges from the mouth instead of being a triangle placed at coordinates
+    that only line up at one x position. That was the bug — fixed coordinates
+    inside a curved opening put the top row on the muzzle and the bottom row
+    on the chin.
+    """
+    span = MOUTH_RIGHT - MOUTH_LEFT
+    above = MOUTH_CORNER_Y - 0.12  # safely outside the lip, for the clip
+    lip_inset = STROKE * 0.45  # the stroke covers this much of the opening
+
+    def tooth(centre: float, half: float, tip_y: float, tip_half: float) -> None:
+        """A blunt tapered tooth. Pointed teeth read as fangs; flat tips are
+        what make a cartoon dog look silly rather than dangerous."""
+        cr.move_to(centre - half, above)
+        cr.line_to(centre + half, above)
+        cr.line_to(centre + tip_half, tip_y)
+        cr.line_to(centre - tip_half, tip_y)
+        cr.close_path()
+
+    # Upper row only, three broad teeth. A lower row would sit exactly where
+    # the tongue hangs, and two rows pointing at each other read as a maw.
+    tip_y = MOUTH_TOP_EDGE + lip_inset + 0.034
+    for index in range(3):
+        centre = MOUTH_LEFT + span * (0.25 + index * 0.25)
+        tooth(centre, span * 0.145, tip_y, span * 0.075)
 
 
 # ── painter ──────────────────────────────────────────────────────────────────
@@ -170,13 +212,18 @@ def draw_face(
     *,
     detail: int = DETAIL_FULL,
     monochrome: Optional[tuple[float, float, float]] = None,
-    show_mouth: bool = True,
+    pixel_size: float = 1e9,
 ) -> None:
     """Draw the face into ``cr`` in unit coordinates.
 
     ``monochrome`` collapses the whole face to one colour — used by the tray,
     where the colour carries the ticket state and the holes do the drawing.
+
+    ``pixel_size`` is how big this face will actually be drawn, in device
+    pixels: it decides which features survive, because whether a mouth reads as
+    a grin or as dirt depends on the size, not on the caller.
     """
+    show_mouth = pixel_size >= MOUTH_MIN
     cr.set_line_join(cairo.LINE_JOIN_ROUND)
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     outline = monochrome or palette["stroke"]
@@ -218,16 +265,19 @@ def draw_face(
             cr.fill()
             cr.set_operator(cairo.OPERATOR_OVER)
 
-        if detail >= 1:
+        # The pupil is never optional. Without it a small icon is a blank
+        # white eye, which reads as something dead rather than something dopey.
+        # It grows as the face shrinks, so it survives the anti-aliasing.
+        pupil_r = 0.045 if detail >= 1 else 0.068
+        cr.new_sub_path()
+        cr.arc(cx + pupil_dx, 0.388, pupil_r, 0, math.tau)
+        cr.set_source_rgb(*(monochrome or palette["pupil"]))
+        cr.fill()
+        if detail >= DETAIL_FULL:
             cr.new_sub_path()
-            cr.arc(cx + pupil_dx, 0.388, 0.045, 0, math.tau)
-            cr.set_source_rgb(*(monochrome or palette["pupil"]))
+            cr.arc(cx + pupil_dx - 0.015, 0.371, 0.016, 0, math.tau)
+            cr.set_source_rgb(*palette["catchlight"])
             cr.fill()
-            if detail >= DETAIL_FULL:
-                cr.new_sub_path()
-                cr.arc(cx + pupil_dx - 0.015, 0.371, 0.016, 0, math.tau)
-                cr.set_source_rgb(*palette["catchlight"])
-                cr.fill()
 
     # Muzzle, then nose. In monochrome the snout gets no outline: a stroke
     # there would just break the silhouette into stripes at 22 px.
@@ -250,12 +300,25 @@ def draw_face(
         cr.fill()
         cr.set_operator(cairo.OPERATOR_OVER)
 
-    # Mouth.
+    # Mouth, then the teeth clipped to it, then the lip drawn over the seam.
+    # Clipping is what keeps the teeth inside the grin; see _teeth.
     cr.set_line_width(STROKE * 0.9)
     if monochrome is None:
         _mouth(cr)
         cr.set_source_rgb(*palette["mouth"])
         cr.fill_preserve()
+
+        if detail >= 2:
+            # Path is consumed by clip(), so it is rebuilt for the stroke below.
+            cr.save()
+            cr.clip()
+            _teeth(cr)
+            cr.set_source_rgb(*palette["teeth"])
+            cr.fill()
+            cr.restore()
+
+        cr.new_path()
+        _mouth(cr)
         cr.set_source_rgb(*outline)
         cr.stroke()
     elif show_mouth:
@@ -264,26 +327,26 @@ def draw_face(
         cr.fill()
         cr.set_operator(cairo.OPERATOR_OVER)
 
-    if detail >= 2 and monochrome is None:
-        for row in ("top", "bottom"):
-            _teeth(cr, row)
-            cr.set_source_rgb(*palette["teeth"])
-            cr.fill()
-
     # Tongue last, so it sits over the mouth and past the jaw.
+    if not show_mouth:
+        return
     if monochrome is None:
-        fill_stroke(lambda: _tongue(cr), palette["tongue"], STROKE * 0.75)
+        fill_stroke(
+            lambda: _scaled(cr, lambda: _tongue(cr), sx=0.90, dx=-0.030),
+            palette["tongue"],
+            STROKE * 0.75,
+        )
     else:
         cr.set_line_width(STROKE * 0.70)
-        _scaled(cr, lambda: _tongue(cr), sx=1.38, sy=0.76, dy=0.050, dx=-0.008)
+        _scaled(cr, lambda: _tongue(cr), sx=1.30, sy=0.78, dy=0.046)
         cr.set_source_rgb(*monochrome)
         cr.fill_preserve()
         cr.set_source_rgb(*outline)
         cr.stroke()
     if detail >= 2 and monochrome is None:
         cr.set_line_width(STROKE * 0.42)
-        cr.move_to(0.492, 0.782)
-        cr.curve_to(0.470, 0.840, 0.474, 0.895, 0.492, 0.918)
+        cr.move_to(0.408, 0.778)
+        cr.curve_to(0.386, 0.836, 0.390, 0.891, 0.408, 0.914)
         cr.set_source_rgb(*palette["tongue_line"])
         cr.stroke()
 
@@ -313,13 +376,7 @@ def face_surface(size: int, *, monochrome: Optional[tuple[float, float, float]] 
     cr = cairo.Context(surface)
     cr.set_antialias(cairo.ANTIALIAS_BEST)
     cr.scale(size, size)
-    draw_face(
-        cr,
-        FULL,
-        detail=_detail_for(size),
-        monochrome=monochrome,
-        show_mouth=size >= MOUTH_MIN,
-    )
+    draw_face(cr, FULL, detail=_detail_for(size), monochrome=monochrome, pixel_size=size)
     surface.flush()
     return surface
 
@@ -333,17 +390,28 @@ SLAB_TOP = (0.247, 0.278, 0.345)
 SLAB_BOTTOM = (0.169, 0.192, 0.239)
 
 
-def app_icon_surface(size: int = 256) -> cairo.ImageSurface:
-    """Three heads peering over each other on a rounded slab.
+def draw_plate(
+    cr: cairo.Context,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    color: tuple[float, float, float],
+) -> None:
+    """A flat rounded plate — the state-coloured backing behind the tray dog."""
+    radius = min(width, height) * 0.30
+    _rounded_rect(cr, x, y, width, height, radius)
+    cr.set_source_rgb(*color)
+    cr.fill()
 
-    The slab exists because the mascot is drawn with near-black outlines: on a
-    dark launcher they would disappear without it, and on a light one the pale
-    grey body would.
+
+def draw_slab(cr: cairo.Context, size: float) -> None:
+    """The rounded slate plate every launcher icon sits on.
+
+    It exists because the artwork is drawn with near-black outlines: on a dark
+    launcher those would vanish without it, and on a light one the pale grey
+    body would. Shared so the drawn fallback and the real artwork cannot drift.
     """
-    surface = _surface(size)
-    cr = cairo.Context(surface)
-    cr.set_antialias(cairo.ANTIALIAS_BEST)
-
     radius = size * 0.22
     _rounded_rect(cr, 0, 0, size, size, radius)
     gradient = cairo.LinearGradient(0, 0, size * 0.35, size)
@@ -352,7 +420,13 @@ def app_icon_surface(size: int = 256) -> cairo.ImageSurface:
     cr.set_source(gradient)
     cr.fill()
 
-    detail = DETAIL_FULL if size >= 96 else _detail_for(size)
+
+def app_icon_surface(size: int = 256) -> cairo.ImageSurface:
+    """Three drawn heads on the slab — the fallback when no artwork is present."""
+    surface = _surface(size)
+    cr = cairo.Context(surface)
+    cr.set_antialias(cairo.ANTIALIAS_BEST)
+    draw_slab(cr, size)
 
     if size >= THREE_HEAD_MIN:
         # Two heads behind, tilted outwards, then the centre one in front.
@@ -368,12 +442,15 @@ def app_icon_surface(size: int = 256) -> cairo.ImageSurface:
         heads = ((0.92, 0.0, 0.010, 0.0),)
 
     for scale, offset_x, offset_y, angle in heads:
+        # Detail follows the head's own pixel size — a side head is barely half
+        # the slab wide, so judging detail by the slab would over-draw it.
+        head_px = size * scale
         cr.save()
         cr.translate(size * (0.5 + offset_x), size * (0.5 + offset_y))
         cr.rotate(angle * 0.5)
-        cr.scale(size * scale, size * scale)
+        cr.scale(head_px, head_px)
         cr.translate(-0.5, -0.5)
-        draw_face(cr, FULL, detail=max(DETAIL_SMALL, detail - 1))
+        draw_face(cr, FULL, detail=_detail_for(head_px), pixel_size=head_px)
         cr.restore()
 
     surface.flush()
@@ -387,43 +464,3 @@ def _rounded_rect(cr: cairo.Context, x: float, y: float, w: float, h: float, r: 
     cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
     cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
     cr.close_path()
-
-
-def preview_sheet(path: str) -> str:
-    """All state colours at tray size, plus the launcher icon — for eyeballing."""
-    from .icons import STATE_COLORS  # local: icons imports this module
-
-    states = ("valid", "expiring", "expired", "none", "error")
-    cell, pad, zoom = 22, 18, 4
-    big = cell * zoom
-    width = pad + len(states) * (big + pad) + big + pad
-    height = big + 2 * pad + 26
-
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-    cr = cairo.Context(surface)
-    cr.set_source_rgb(0.13, 0.14, 0.18)  # a dark bar, to judge real contrast
-    cr.paint()
-
-    for index, state in enumerate(states):
-        face = face_surface(cell, monochrome=STATE_COLORS[state])
-        x = pad + index * (big + pad)
-        cr.save()
-        cr.translate(x, pad)
-        cr.scale(zoom, zoom)
-        cr.set_source_surface(face, 0, 0)
-        cr.paint()
-        cr.restore()
-        cr.set_source_rgb(0.85, 0.87, 0.91)
-        cr.select_font_face("sans")
-        cr.set_font_size(13)
-        cr.move_to(x, pad + big + 18)
-        cr.show_text(state)
-
-    app = app_icon_surface(big)
-    cr.set_source_surface(app, pad + len(states) * (big + pad), pad)
-    cr.paint()
-    cr.move_to(pad + len(states) * (big + pad), pad + big + 18)
-    cr.show_text("launcher")
-
-    surface.write_to_png(path)
-    return path
