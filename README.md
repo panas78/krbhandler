@@ -8,11 +8,14 @@ Built to run anywhere: Noctalia, Waybar, KDE Plasma, GNOME with the AppIndicator
 extension. It speaks `org.kde.StatusNotifierItem` + `com.canonical.dbusmenu`
 directly, so there is no GTK3/X11 dependency and no libappindicator.
 
-```
-┌─────────────────────────────────┐
-│            9h59m   [ Renew ]    │   ← tray tooltip + badge
-└─────────────────────────────────┘
-```
+The icon is Cerberus — the three-headed dog who guards the gates, which is
+exactly what "Kerberos" means. The silhouette is tinted by ticket state:
+
+![icon states](data/icons/preview-states.png)
+
+| green | amber | red | grey |
+|---|---|---|---|
+| ticket valid | expiring soon | expired / error | no ticket |
 
 ## Why it exists
 
@@ -51,8 +54,21 @@ cd krbctl
 ./install.sh
 ```
 
-Installs into `~/.local`, plus a login autostart entry for the tray. The GUI
-stack comes from the distro (`python3-gobject`, `gtk4`, `libadwaita`,
+That single command creates:
+
+| Put where | What |
+|---|---|
+| `~/.local/share/krbctl/` | the application |
+| `~/.local/bin/krbctl` | launcher on `PATH` |
+| `~/.local/share/applications/io.github.pan.Krbctl.desktop` | menu entry |
+| `~/.local/share/icons/hicolor/*/apps/krbctl.png` | icon at 9 sizes |
+| `~/.local/share/metainfo/` | AppStream metadata |
+| `~/.config/autostart/krbctl-tray.desktop` | tray on login |
+
+Both `.desktop` files are validated with `desktop-file-validate` during install,
+because a malformed entry silently appears in no menu at all.
+
+The GUI stack comes from the distro (`python3-gobject`, `gtk4`, `libadwaita`,
 `python3-cairo`, `libsecret`, `krb5-workstation`), **not** from pip — those
 packages ship typelibs that must match the system libraries, and a venv
 PyGObject routinely cannot see them.
@@ -139,8 +155,16 @@ krbctl/
 │   ├── tray.py       # StatusNotifierItem + DBusMenu over Gio
 │   ├── window.py     # GTK4 / libadwaita window
 │   └── app.py        # poller, auto-renew, notifications
-├── data/             # .desktop, AppStream metadata, SVG icon
-├── tests/            # parsing + classification, no KDC needed
+├── data/
+│   ├── icons/src/         # Cerberus artwork (alpha silhouette)
+│   ├── icons/hicolor/     # generated PNG icon set, one dir per size
+│   ├── *.desktop.in       # desktop entry templates
+│   └── *.metainfo.xml     # AppStream metadata
+├── tools/
+│   ├── prepare-art.py     # keys the background out of the raw artwork
+│   ├── make-icons.py      # regenerates the icon set + preview sheet
+│   └── tray-probe.py      # isolates tray/D-Bus problems
+├── tests/                 # parsing + classification, no KDC needed
 └── install.sh
 ```
 

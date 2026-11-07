@@ -22,6 +22,7 @@
     <ul>
       <li>Tray icon over StatusNotifierItem — works in Noctalia, Waybar, KDE Plasma and GNOME's AppIndicator extension</li>
       <li>Automatic renewal shortly before expiry, with backoff when the KDC is unreachable</li>
+      <li>Cerberus tray icon whose colour shows the ticket state at a glance</li>
       <li>Multiple accounts and credential caches</li>
       <li>Creates keytabs from a password, so no ktutil incantations</li>
       <li>Notifications on expiring, expired and renewal failure</li>
@@ -48,7 +49,8 @@
   <releases>
     <release version="1.0.0" date="2026-11-07">
       <description>
-        <p>First release.</p>
+        <p>First release: tray icon, GTK4 window, auto-renew, keytab and
+        password accounts, and JSON status output for status bars.</p>
       </description>
     </release>
   </releases>

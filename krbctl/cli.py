@@ -269,6 +269,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_gui = sub.add_parser("gui", help="open the settings window")
     p_gui.set_defaults(func=lambda a: _gui_run(tray=True, show_window=True))
 
+    # Same as `gui`, under the name the .desktop file uses. A launcher reads
+    # more naturally as `krbctl window` than `krbctl gui`.
+    p_window = sub.add_parser("window", help="open the window (alias for gui)")
+    p_window.set_defaults(func=lambda a: _gui_run(tray=True, show_window=True))
+
     return parser
 
 
