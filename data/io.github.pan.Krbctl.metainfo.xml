@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.pan.Krbctl</id>
+  <name>Kerberos Tickets</name>
+  <summary>Keep your Kerberos ticket alive and see when it expires</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      A small tray application for MIT Kerberos on the Linux desktop. It shows
+      the time remaining on your ticket-granting ticket, renews it before it
+      expires, and lets you sign in, switch accounts and destroy tickets from a
+      native GTK window.
+    </p>
+    <p>
+      Accounts can renew unattended from a keytab, or from a password kept in the
+      Secret Service (GNOME Keyring / KWallet). The same state is available to
+      scripts and status bars through <code>krbctl status --json</code>.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Tray icon over StatusNotifierItem — works in Noctalia, Waybar, KDE Plasma and GNOME's AppIndicator extension</li>
+      <li>Automatic renewal shortly before expiry, with backoff when the KDC is unreachable</li>
+      <li>Multiple accounts and credential caches</li>
+      <li>Creates keytabs from a password, so no ktutil incantations</li>
+      <li>Notifications on expiring, expired and renewal failure</li>
+      <li>Scriptable: human and JSON output from the command line</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.pan.Krbctl.desktop</launchable>
+
+  <url type="homepage">https://github.com/pan/krbctl</url>
+  <url type="bugtracker">https://github.com/pan/krbctl/issues</url>
+
+  <developer id="io.github.pan">
+    <name>Panagiotis Perivolaris</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <categories>
+    <category>System</category>
+    <category>Security</category>
+  </categories>
+
+  <releases>
+    <release version="1.0.0" date="2026-11-07">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

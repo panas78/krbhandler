@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "krbctl"
+version = "1.0.0"
+description = "Kerberos ticket manager with a tray icon and a GTK4 window"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Panagiotis Perivolaris", email = "p.perivolaris@diastasys.gr" }]
+keywords = ["kerberos", "krb5", "kinit", "tray", "gtk4", "libadwaita"]
+classifiers = [
+  "Environment :: X11 Applications :: GTK",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Systems Administration",
+]
+
+# The GUI stack is deliberately NOT a pip dependency. PyGObject, GTK4,
+# libadwaita, libsecret and pycairo are distro packages with typelibs that must
+# match the system libraries; pulling wheels instead is a reliable way to build
+# an app that cannot find its own typelibs. install.sh installs them per distro.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.scripts]
+krbctl = "krbctl.cli:main"
+
+[project.gui-scripts]
+krbctl-gui = "krbctl.cli:main"
+
+[tool.setuptools]
+packages = ["krbctl"]
+
+[tool.setuptools.package-data]
+krbctl = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]

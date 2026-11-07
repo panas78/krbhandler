@@ -1,0 +1,597 @@
+"""The GTK4 / libadwaita window.
+
+Everything that talks to the KDC (``klist``, ``kinit``, ``ktutil``) can block for
+seconds when the VPN is down, so it never runs on the GTK main loop: callers get
+:func:`run_async` and results come back on the main thread via ``GLib.idle_add``.
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+from typing import Callable, Optional
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+
+from . import config, icons, kerberos, secrets  # noqa: E402
+from .config import METHOD_KEYTAB, METHOD_PASSWORD, Account  # noqa: E402
+
+CSS = """
+.krb-badge { font-feature-settings: "tnum"; font-weight: 600; }
+.krb-valid { color: #a3be8c; }
+.krb-expiring { color: #ebcb8b; }
+.krb-expired { color: #bf616a; }
+.krb-none { color: #8fbcbb; }
+.krb-error { color: #bf616a; }
+.krb-detail { font-family: monospace; font-size: 11px; }
+"""
+
+
+def run_async(
+    work: Callable[[], object],
+    on_success: Callable[[object], None],
+    on_error: Callable[[Exception], None],
+) -> None:
+    """Run blocking work off the main loop, deliver the result on it."""
+
+    def worker() -> None:
+        try:
+            result = work()
+        except Exception as exc:  # noqa: BLE001 — every failure becomes a toast
+            GLib.idle_add(on_error, exc)
+        else:
+            GLib.idle_add(on_success, result)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _ticket_lines(account: Account) -> str:
+    """Full ``klist`` output for the details dialog."""
+    import subprocess
+
+    env = dict(os.environ, LC_ALL="C", LANG="C")
+    if account.cache:
+        env["KRB5CCNAME"] = kerberos.expand(account.cache) or ""
+    argv = ["klist"] if not account.cache else ["klist", "-c", kerberos.expand(account.cache) or ""]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=20)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"klist failed: {exc}"
+    return (proc.stdout + proc.stderr).strip() or "(no output)"
+
+
+class EditorWindow(Adw.Window):
+    """Add or edit one account.
+
+    The form is plain: principal, how to authenticate, and renewal policy. When
+    the method is "Keytab" and the file does not exist yet, the same dialog can
+    build one from the account password with ``ktutil`` — that removes the
+    ``ktutil`` incantation from the user's life, which was the whole point.
+    """
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        account: Optional[Account] = None,
+        on_save: Optional[Callable[[Account], None]] = None,
+    ):
+        super().__init__()
+        self.set_transient_for(parent)
+        self.set_modal(True)
+        self.set_title("Edit account" if account else "Add account")
+        self.set_default_size(520, 640)
+
+        self._existing = account
+        self._on_save = on_save
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.close())
+        header.pack_start(cancel)
+        self._save_button = Gtk.Button(label="Save")
+        self._save_button.add_css_class("suggested-action")
+        self._save_button.connect("clicked", self._on_save_clicked)
+        header.pack_end(self._save_button)
+        toolbar.add_top_bar(header)
+
+        page = Adw.PreferencesPage()
+        toolbar.set_content(page)
+        self.set_content(toolbar)
+
+        # ── identity ──
+        identity = Adw.PreferencesGroup(title="Identity")
+        page.add(identity)
+
+        self.principal_row = Adw.EntryRow(title="Principal")
+        self.principal_row.set_text(account.principal if account else "")
+        init = kerberos.default_realm()
+        self.principal_row.set_tooltip_text(
+            f"user@REALM — this realm is {init}" if init else "user@REALM"
+        )
+        identity.add(self.principal_row)
+
+        self.label_row = Adw.EntryRow(title="Display name (optional)")
+        self.label_row.set_text(account.label if account and account.label != account.principal else "")
+        identity.add(self.label_row)
+
+        # ── authentication ──
+        auth = Adw.PreferencesGroup(title="Authentication")
+        page.add(auth)
+
+        self.method_row = Adw.ComboRow(title="Method")
+        self.method_row.set_model(
+            Gtk.StringList.new(["Keytab — unattended, no password", "Password — stored in the keyring"])
+        )
+        self.method_row.set_selected(0 if (not account or account.method == METHOD_KEYTAB) else 1)
+        self.method_row.connect("notify::selected", lambda *_: self._sync_method())
+        auth.add(self.method_row)
+
+        self.keytab_row = Adw.EntryRow(title="Keytab file")
+        self.keytab_row.set_text(account.keytab if account else config.DEFAULT_KEYTAB)
+        browse = Gtk.Button(icon_name="document-open-symbolic", valign=Gtk.Align.CENTER)
+        browse.add_css_class("flat")
+        browse.connect("clicked", self._browse_keytab)
+        self.keytab_row.add_suffix(browse)
+        auth.add(self.keytab_row)
+
+        self.password_row = Adw.PasswordEntryRow(title="Password")
+        auth.add(self.password_row)
+
+        self.remember_row = Adw.SwitchRow(
+            title="Save password in the keyring",
+            subtitle="Needed for automatic renewal without a prompt",
+        )
+        self.remember_row.set_active(account.remember_password if account else True)
+        auth.add(self.remember_row)
+
+        self.make_keytab_row = Adw.ActionRow(
+            title="Create keytab from password",
+            subtitle="Writes the keytab so future renewals need no password",
+        )
+        make_button = Gtk.Button(label="Create", valign=Gtk.Align.CENTER)
+        make_button.connect("clicked", self._make_keytab)
+        self.make_keytab_row.add_suffix(make_button)
+        self.make_keytab_row.set_activatable_widget(make_button)
+        auth.add(self.make_keytab_row)
+
+        # ── policy ──
+        policy = Adw.PreferencesGroup(title="Renewal")
+        page.add(policy)
+
+        self.auto_row = Adw.SwitchRow(
+            title="Renew automatically",
+            subtitle="Refresh the ticket when it is close to expiring",
+        )
+        self.auto_row.set_active(account.auto_renew if account else True)
+        policy.add(self.auto_row)
+
+        self.cache_row = Adw.EntryRow(title="Credential cache (optional)")
+        self.cache_row.set_text(account.cache if account else "")
+        self.cache_row.set_tooltip_text("Leave empty to use the session default cache")
+        policy.add(self.cache_row)
+
+        self.warn_row = Adw.SpinRow.new_with_range(1, 240, 1)
+        self.warn_row.set_title("Warn before expiry (minutes)")
+        self.warn_row.set_value(account.warn_minutes if account else config.DEFAULT_WARN_MINUTES)
+        policy.add(self.warn_row)
+
+        self._sync_method()
+
+    # ── behaviour ─────────────────────────────────────────────
+
+    def _uses_keytab(self) -> bool:
+        return self.method_row.get_selected() == 0
+
+    def _sync_method(self) -> None:
+        keytab = self._uses_keytab()
+        self.keytab_row.set_visible(keytab)
+        self.make_keytab_row.set_visible(keytab)
+        self.password_row.set_visible(not keytab)
+        self.remember_row.set_visible(not keytab)
+        if not self._uses_keytab() and self._existing:
+            # Never re-ask for a password we already hold.
+            if secrets.lookup_password(self._existing.principal):
+                self.password_row.set_placeholder_text("Stored in keyring — leave empty to keep")
+            else:
+                self.password_row.set_placeholder_text("Needed to sign in")
+
+    def _browse_keytab(self, _button: Gtk.Button) -> None:
+        dialog = Gtk.FileDialog(title="Select keytab")
+        keytab = Gio.File.new_for_path(kerberos.expand(self.keytab_row.get_text()) or os.path.expanduser("~"))
+
+        def done(source, result, _data):
+            try:
+                chosen = source.open_finish(result)
+            except GLib.Error:
+                return
+            path = chosen.get_path() or ""
+            home = os.path.expanduser("~")
+            self.keytab_row.set_text(path.replace(home, "~", 1) if path.startswith(home) else path)
+
+        dialog.open(self, None, done, None)
+        del keytab
+
+    def _toast(self, message: str) -> None:
+        # The editor has no toast overlay; the parent window shows it instead.
+        parent = self.get_transient_for()
+        if isinstance(parent, MainWindow):
+            parent.toast(message)
+
+    def _make_keytab(self, _button: Gtk.Button) -> None:
+        principal = self.principal_row.get_text().strip()
+        password = self.password_row.get_text()
+        path = self.keytab_row.get_text().strip() or config.DEFAULT_KEYTAB
+        if not principal:
+            self._toast("Enter a principal first")
+            return
+        if not password:
+            self.password_row.set_visible(True)
+            self._toast("Type the password, then press Create")
+            return
+
+        self._save_button.set_sensitive(False)
+
+        def work():
+            return kerberos.create_keytab(principal, password, path)
+
+        def ok(written):
+            self._save_button.set_sensitive(True)
+            self.password_row.set_text("")
+            self._toast(f"Keytab written to {written}")
+
+        def fail(exc):
+            self._save_button.set_sensitive(True)
+            self._toast(getattr(exc, "friendly", str(exc)))
+
+        run_async(work, ok, fail)
+
+    def _on_save_clicked(self, _button: Gtk.Button) -> None:
+        principal = self.principal_row.get_text().strip()
+        if not principal:
+            self._toast("A principal is required")
+            return
+        if "@" not in principal:
+            realm = kerberos.default_realm()
+            if realm:
+                principal = f"{principal}@{realm}"
+
+        keytab = self._uses_keytab()
+        account = Account(
+            id=self._existing.id if self._existing else "",
+            principal=principal,
+            label=self.label_row.get_text().strip() or principal,
+            method=METHOD_KEYTAB if keytab else METHOD_PASSWORD,
+            keytab=self.keytab_row.get_text().strip() or config.DEFAULT_KEYTAB,
+            cache=self.cache_row.get_text().strip(),
+            auto_renew=self.auto_row.get_active(),
+            remember_password=self.remember_row.get_active(),
+            warn_minutes=int(self.warn_row.get_value()),
+        )
+
+        # A typed password is stored (or used once) here, not on save, so the
+        # keyring write is attributed to an explicit user action.
+        password = self.password_row.get_text()
+        if not keytab and password:
+            if account.remember_password:
+                if not secrets.store_password(principal, password):
+                    self._toast("No keyring available — the password will be asked each time")
+                    account.remember_password = False
+            else:
+                account.remember_password = False
+
+        if self._on_save:
+            self._on_save(account)
+        self.close()
+
+
+class MainWindow(Adw.ApplicationWindow):
+    """Account list, live ticket state, and the manual actions."""
+
+    def __init__(self, app: Adw.Application, store: config.Store):
+        super().__init__(application=app, title="Kerberos Tickets")
+        self.set_default_size(560, 680)
+        self.store = store
+        self._statuses: dict[str, kerberos.Status] = {}
+        self._groups: dict[str, Adw.PreferencesGroup] = {}
+        self._empty_rows: list[Gtk.Widget] = []
+
+        self._toasts = Adw.ToastOverlay()
+        toolbar = Adw.ToolbarView()
+        self._toasts.set_child(toolbar)
+        self.set_content(self._toasts)
+
+        header = Adw.HeaderBar()
+        add_button = Gtk.Button(icon_name="list-add-symbolic")
+        add_button.set_tooltip_text("Add account")
+        add_button.connect("clicked", lambda *_: self.open_editor(None))
+        header.pack_start(add_button)
+
+        menu = Gio.Menu()
+        menu.append("Diagnose setup", "win.doctor")
+        menu.append("About", "win.about")
+        menu.append("Quit", "win.quit")
+        menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic")
+        menu_button.set_menu_model(menu)
+        header.pack_end(menu_button)
+        toolbar.add_top_bar(header)
+
+        self._page = Adw.PreferencesPage()
+        toolbar.set_content(self._page)
+
+        self._empty_group = Adw.PreferencesGroup()
+        self._page.add(self._empty_group)
+
+        self._install_actions()
+        self._apply_css()
+        self.rebuild()
+
+    # ── chrome ────────────────────────────────────────────────
+
+    def _apply_css(self) -> None:
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode("utf-8"))
+        display = self.get_display()
+        if display is not None:
+            Gtk.StyleContext.add_provider_for_display(
+                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+
+    def _install_actions(self) -> None:
+        for name, handler in (
+            ("doctor", self._on_doctor),
+            ("about", self._on_about),
+            ("quit", lambda *_: self.get_application().quit()),
+        ):
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", handler)
+            self.add_action(action)
+
+    def toast(self, message: str) -> None:
+        self._toasts.add_toast(Adw.Toast.new(message))
+
+    def _on_about(self, *_args) -> None:
+        from . import __version__
+
+        about = Adw.AboutWindow(
+            transient_for=self,
+            application_name="Kerberos Tickets",
+            application_icon="krbctl",
+            version=__version__,
+            developer_name="Panagiotis Perivolaris",
+            comments="Manage Kerberos tickets from the tray or a window.",
+        )
+        about.present()
+
+    def _on_doctor(self, *_args) -> None:
+        from .cli import cmd_doctor
+        import argparse
+        import io
+        from contextlib import redirect_stdout
+
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            try:
+                cmd_doctor(argparse.Namespace())
+            except Exception as exc:  # noqa: BLE001
+                buffer.write(f"doctor failed: {exc}")
+        self._show_text("Setup diagnosis", buffer.getvalue())
+
+    def _show_text(self, title: str, body: str) -> None:
+        window = Adw.Window(transient_for=self, modal=True, title=title)
+        window.set_default_size(560, 460)
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        close = Gtk.Button(label="Close")
+        close.connect("clicked", lambda *_: window.close())
+        header.pack_end(close)
+        toolbar.add_top_bar(header)
+
+        label = Gtk.Label(label=body, xalign=0, yalign=0)
+        label.add_css_class("krb-detail")
+        label.set_selectable(True)
+        label.set_margin_top(12)
+        label.set_margin_bottom(12)
+        label.set_margin_start(16)
+        label.set_margin_end(16)
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_child(label)
+        toolbar.set_content(scroller)
+        window.set_content(toolbar)
+        window.present()
+
+    # ── content ───────────────────────────────────────────────
+
+    def reload(self) -> None:
+        self.store.load()
+        self.rebuild()
+
+    def rebuild(self) -> None:
+        for group in list(self._groups.values()):
+            self._page.remove(group)
+        self._groups.clear()
+        # AdwPreferencesGroup has no clear(); get_first_child() hands back its
+        # internal box, not the rows, so the rows are tracked explicitly.
+        for row in list(self._empty_rows):
+            self._empty_group.remove(row)
+        self._empty_rows.clear()
+
+        if not self.store.accounts:
+            self._empty_group.set_title("No accounts")
+            row = Adw.ActionRow(
+                title="Add your Kerberos account",
+                subtitle="Use the + button, or drop a keytab in your home directory",
+            )
+            self._empty_group.add(row)
+            self._empty_rows.append(row)
+            return
+
+        self._empty_group.set_title("")
+        for account in self.store.accounts:
+            self._add_account_group(account)
+
+    def _add_account_group(self, account: Account) -> None:
+        group = Adw.PreferencesGroup()
+        group.set_title(account.label)
+        group.set_description(account.principal)
+
+        edit = Gtk.Button(label="Edit")
+        edit.add_css_class("flat")
+        edit.connect("clicked", lambda *_: self.open_editor(account))
+        group.set_header_suffix(edit)
+
+        # State row: icon + badge + the one action that matters right now.
+        state_row = Adw.ActionRow(title="Ticket")
+        image = Gtk.Image.new_from_pixbuf(icons.gdk_pixbuf_for_state("none", 20))
+        state_row.add_prefix(image)
+
+        badge = Gtk.Label(label="…")
+        badge.add_css_class("krb-badge")
+        state_row.add_suffix(badge)
+
+        action_button = Gtk.Button(label="Renew")
+        action_button.add_css_class("suggested-action")
+        action_button.set_valign(Gtk.Align.CENTER)
+        state_row.add_suffix(action_button)
+        action_button.connect("clicked", lambda *_: self.renew(account))
+        group.add(state_row)
+
+        details = Adw.ActionRow(title="Details")
+        details.set_subtitle("")
+        show = Gtk.Button(label="Show")
+        show.set_valign(Gtk.Align.CENTER)
+        show.add_css_class("flat")
+        show.connect("clicked", lambda *_: self._show_text(f"klist — {account.principal}", _ticket_lines(account)))
+        details.add_suffix(show)
+        group.add(details)
+
+        destroy = Adw.ActionRow(title="Destroy ticket", subtitle="Sign out of this account")
+        destroy_button = Gtk.Button(label="Destroy")
+        destroy_button.set_valign(Gtk.Align.CENTER)
+        destroy_button.add_css_class("destructive-action")
+        destroy_button.connect("clicked", lambda *_: self.destroy(account))
+        destroy.add_suffix(destroy_button)
+        group.add(destroy)
+
+        remove = Adw.ActionRow(title="Remove account", subtitle="Forget this account in the app")
+        remove_button = Gtk.Button(icon_name="user-trash-symbolic")
+        remove_button.set_valign(Gtk.Align.CENTER)
+        remove_button.add_css_class("flat")
+        remove_button.connect("clicked", lambda *_: self.remove(account))
+        remove.add_suffix(remove_button)
+        group.add(remove)
+
+        self._page.add(group)
+        self._groups[account.id] = group
+
+        # Stash the widgets that the poller updates.
+        group._badge = badge  # type: ignore[attr-defined]
+        group._image = image  # type: ignore[attr-defined]
+        group._details = details  # type: ignore[attr-defined]
+        group._button = action_button  # type: ignore[attr-defined]
+
+        self._render_state(account, self._statuses.get(account.id))
+
+    def set_statuses(self, statuses: dict[str, kerberos.Status]) -> None:
+        self._statuses = statuses
+        for account in self.store.accounts:
+            self._render_state(account, statuses.get(account.id))
+
+    def _render_state(self, account: Account, status: Optional[kerberos.Status]) -> None:
+        group = self._groups.get(account.id)
+        if group is None:
+            return
+        badge: Gtk.Label = group._badge  # type: ignore[attr-defined]
+        image: Gtk.Image = group._image  # type: ignore[attr-defined]
+        details: Adw.ActionRow = group._details  # type: ignore[attr-defined]
+        button: Gtk.Button = group._button  # type: ignore[attr-defined]
+
+        state = status.state if status else "none"
+        badge.set_label(status.label if status else "…")
+        for css in ("krb-valid", "krb-expiring", "krb-expired", "krb-none", "krb-error"):
+            badge.remove_css_class(css)
+        badge.add_css_class(f"krb-{state}")
+        image.set_from_pixbuf(icons.gdk_pixbuf_for_state(state, 20))
+
+        details.set_subtitle(status.detail if status else "Reading ticket…")
+        has_ticket = status is not None and status.state not in ("none", "error")
+        button.set_label("Renew" if has_ticket else "Sign in")
+        button.set_sensitive(True)
+
+    # ── actions ───────────────────────────────────────────────
+
+    def open_editor(self, account: Optional[Account]) -> None:
+        def saved(new_account: Account) -> None:
+            self.store.add(new_account)
+            self.rebuild()
+            self.toast(f"Saved {new_account.principal}")
+
+        EditorWindow(self, account, on_save=saved).present()
+
+    def renew(self, account: Account, *, quiet: bool = False) -> None:
+        def work():
+            if account.method == METHOD_KEYTAB:
+                kerberos.kinit_from_keytab(account.principal, account.keytab, account.cache or None)
+            else:
+                password = secrets.lookup_password(account.principal)
+                if not password:
+                    raise kerberos.KerberosError(
+                        "No stored password",
+                        hint="open Edit and set one, or use a keytab",
+                    )
+                kerberos.kinit_with_password(account.principal, password, account.cache or None)
+            return kerberos.status(account.cache or None, warn_minutes=account.warn_minutes)
+
+        def ok(status):
+            self._statuses[account.id] = status  # type: ignore[assignment]
+            self._render_state(account, status)  # type: ignore[arg-type]
+            if not quiet:
+                self.toast(f"Renewed — {status.label} left")  # type: ignore[attr-defined]
+
+        def fail(exc):
+            message = getattr(exc, "friendly", str(exc))
+            if not quiet:
+                self.toast(message)
+            print(f"krbctl: renew {account.principal}: {message}", flush=True)
+
+        run_async(work, ok, fail)
+
+    def destroy(self, account: Account) -> None:
+        def work():
+            kerberos.destroy(account.cache or None)
+            return kerberos.status(account.cache or None, warn_minutes=account.warn_minutes)
+
+        def ok(status):
+            self._statuses[account.id] = status  # type: ignore[assignment]
+            self._render_state(account, status)  # type: ignore[arg-type]
+            self.toast("Ticket destroyed")
+
+        run_async(work, ok, lambda exc: self.toast(getattr(exc, "friendly", str(exc))))
+
+    def remove(self, account: Account) -> None:
+        dialog = Adw.AlertDialog.new(
+            f"Remove {account.label}?",
+            "The app forgets this account and any stored password. The ticket itself is left alone.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("remove", "Remove")
+        dialog.set_response_appearance("remove", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+        dialog.set_close_response("cancel")
+
+        def on_response(_dialog, response):
+            if response != "remove":
+                return
+            if account.remember_password:
+                secrets.forget_password(account.principal)
+            self.store.remove(account.id)
+            self._statuses.pop(account.id, None)
+            self.rebuild()
+            self.toast("Account removed")
+
+        dialog.connect("response", on_response)
+        dialog.present(self)

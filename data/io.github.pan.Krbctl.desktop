@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Kerberos Tickets
+GenericName=Kerberos Ticket Manager
+Comment=Keep your Kerberos ticket alive and see when it expires
+Exec=krbctl window
+Icon=krbctl
+Terminal=false
+Categories=System;Security;
+Keywords=kerberos;kinit;ticket;krb5;renew;
+StartupNotify=true
+X-GNOME-UsesNotifications=true
