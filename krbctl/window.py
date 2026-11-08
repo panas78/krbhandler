@@ -17,7 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
-from . import config, icons, kerberos, secrets  # noqa: E402
+from . import autostart, config, icons, kerberos, secrets  # noqa: E402
 from .config import METHOD_KEYTAB, METHOD_PASSWORD, Account  # noqa: E402
 
 CSS = """
@@ -326,6 +326,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._empty_group = Adw.PreferencesGroup()
         self._page.add(self._empty_group)
 
+        # Built once and re-appended last by rebuild(), so it stays pinned to the
+        # bottom no matter how many accounts appear or disappear above it.
+        self._syncing_startup = False
+        self._startup_group = self._build_startup_group()
+
         self._install_actions()
         self._apply_css()
         self.rebuild()
@@ -419,6 +424,7 @@ class MainWindow(Adw.ApplicationWindow):
         for row in list(self._empty_rows):
             self._empty_group.remove(row)
         self._empty_rows.clear()
+        self._page.remove(self._startup_group)
 
         if not self.store.accounts:
             self._empty_group.set_title("No accounts")
@@ -428,11 +434,67 @@ class MainWindow(Adw.ApplicationWindow):
             )
             self._empty_group.add(row)
             self._empty_rows.append(row)
-            return
+        else:
+            self._empty_group.set_title("")
+            for account in self.store.accounts:
+                self._add_account_group(account)
 
-        self._empty_group.set_title("")
-        for account in self.store.accounts:
-            self._add_account_group(account)
+        self._page.add(self._startup_group)
+        self._sync_startup_row()
+
+    # ── startup ───────────────────────────────────────────────
+
+    def _build_startup_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup()
+        group.set_title("Startup")
+        self._startup_row = Adw.SwitchRow(
+            title="Start at login",
+            subtitle="Show the ticket state in the bar without opening this window",
+        )
+        # notify::active rather than a click handler: the switch can be flipped
+        # by keyboard, and by assistive tech that drives the property directly.
+        self._startup_row.connect("notify::active", self._on_startup_toggled)
+        group.add(self._startup_row)
+        return group
+
+    def _sync_startup_row(self) -> None:
+        """Point the switch at what is actually on disk, not at what we hoped.
+
+        Written state is the only truth here: another process (or the CLI) may
+        have changed it since the window opened.
+        """
+        info = autostart.status()
+        self._syncing_startup = True
+        try:
+            self._startup_row.set_active(info["enabled"])
+            if not info["binary"]:
+                self._startup_row.set_sensitive(False)
+                self._startup_row.set_subtitle("krbctl is not installed — run ./install.sh")
+            elif not info["binary_exists"]:
+                self._startup_row.set_sensitive(False)
+                self._startup_row.set_subtitle(f"Launcher is missing: {info['binary']}")
+            else:
+                self._startup_row.set_sensitive(True)
+                self._startup_row.set_subtitle(
+                    "Show the ticket state in the bar without opening this window"
+                )
+        finally:
+            self._syncing_startup = False
+
+    def _on_startup_toggled(self, row: Gtk.Widget, _pspec) -> None:
+        if self._syncing_startup:
+            return
+        wanted = row.get_active()
+        try:
+            if wanted:
+                autostart.enable()
+            else:
+                autostart.disable()
+        except autostart.AutostartError as exc:
+            self.toast(str(exc))
+        else:
+            self.toast("Will start at login" if wanted else "Will not start at login")
+        self._sync_startup_row()
 
     def _add_account_group(self, account: Account) -> None:
         group = Adw.PreferencesGroup()
@@ -500,6 +562,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._statuses = statuses
         for account in self.store.accounts:
             self._render_state(account, statuses.get(account.id))
+        # The CLI can change autostart while this window is open; re-read it on
+        # each poll so the switch never lies about what login will do.
+        self._sync_startup_row()
 
     def _render_state(self, account: Account, status: Optional[kerberos.Status]) -> None:
         group = self._groups.get(account.id)

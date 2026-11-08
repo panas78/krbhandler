@@ -14,7 +14,7 @@ import json
 import sys
 from typing import Optional
 
-from . import config, kerberos, secrets
+from . import autostart, config, kerberos, secrets
 from .config import Account, METHOD_KEYTAB
 
 EXIT_OK = 0
@@ -173,6 +173,39 @@ def cmd_destroy(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_autostart(args: argparse.Namespace) -> int:
+    """Turn start-at-login on or off, and report what it currently is."""
+    action = args.action
+
+    if action in ("on", "off"):
+        try:
+            if action == "on":
+                path = autostart.enable()
+                print(f"Autostart enabled: {path}")
+            elif autostart.disable():
+                print(f"Autostart disabled: {autostart.entry_path()}")
+            else:
+                print("Autostart is not installed, nothing to disable.")
+                return EXIT_OK
+        except autostart.AutostartError as exc:
+            print(exc, file=sys.stderr)
+            return EXIT_ERROR
+
+    info = autostart.status()
+    if args.json:
+        print(json.dumps(info, indent=2))
+        return EXIT_OK
+
+    print(f"autostart  {'enabled' if info['enabled'] else 'disabled'}")
+    print(f"entry      {info['path']}")
+    if info["binary"]:
+        note = "" if info["binary_exists"] else "  (MISSING — reinstall or run: krbctl autostart on)"
+        print(f"launcher   {info['binary']}{note}")
+    else:
+        print("launcher   not found — install it with ./install.sh")
+    return EXIT_OK
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Explain what is and isn't ready — the first thing to run on a new box."""
     problems = 0
@@ -196,6 +229,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     print("\nsecrets")
     print(f"  libsecret      {'available' if secrets.available() else 'MISSING (python3-secret)'}")
+
+    print("\nstartup")
+    info = autostart.status()
+    print(f"  autostart      {'enabled' if info['enabled'] else 'disabled'}  {info['path']}")
+    if info["binary"] and not info["binary_exists"]:
+        print(f"  launcher       MISSING -> {info['binary']}  (run: krbctl autostart on)")
+        problems += 1
 
     print("\ncaches")
     caches = kerberos.list_caches()
@@ -258,6 +298,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_destroy.add_argument("--account")
     p_destroy.add_argument("--quiet", "-q", action="store_true")
     p_destroy.set_defaults(func=cmd_destroy)
+
+    p_auto = sub.add_parser("autostart", help="start the tray at login")
+    p_auto.add_argument(
+        "action",
+        nargs="?",
+        choices=("on", "off", "status"),
+        default="status",
+        help="enable, disable, or report (default: status)",
+    )
+    p_auto.add_argument("--json", action="store_true")
+    p_auto.set_defaults(func=cmd_autostart)
 
     p_doctor = sub.add_parser("doctor", help="diagnose the setup")
     p_doctor.set_defaults(func=cmd_doctor)
