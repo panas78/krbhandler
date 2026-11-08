@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from . import kerberos
@@ -382,6 +383,56 @@ def _service_active(service: str) -> bool:
     return _run([SYSTEMCTL, "is-active", "--quiet", service], timeout=30).returncode == 0
 
 
+# What authselect actually rewrites. If pam_sss is in these, SSSD is in the
+# login path regardless of what the profile is called.
+PAM_FILES = ("/etc/pam.d/system-auth", "/etc/pam.d/password-auth")
+
+
+def pam_sss_configured() -> bool:
+    """Whether ``pam_sss`` is in the PAM stack.
+
+    The profile *name* is not the thing that matters. ``authselect`` custom
+    profiles are a supported way to add a module (a fingerprint reader, say) on
+    top of a base, and they are reported as ``custom/<name>`` with no record of
+    the base -- so requiring a profile called ``sssd`` rejects a machine where
+    SSSD is configured exactly correctly. The selected files are the evidence.
+    """
+    for path in PAM_FILES:
+        try:
+            text = Path(path).read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "pam_sss.so" in stripped:
+                return True
+    return False
+
+
+def authselect_check(severity: str = "required") -> Check:
+    """The single authselect verdict, used by both phases.
+
+    One function rather than two inline checks: they had drifted apart, and the
+    report printed the same line in both the prerequisite and the membership
+    section.
+    """
+    profile = authselect_profile()
+    has_pam_sss = pam_sss_configured()
+    ok = profile.startswith("sssd") or has_pam_sss
+
+    if not profile:
+        detail = "authselect not configured"
+    elif profile.startswith("sssd"):
+        detail = f"profile {profile}"
+    elif has_pam_sss:
+        detail = f"profile {profile} — custom profile with pam_sss in the PAM stack"
+    else:
+        detail = f"profile {profile} — pam_sss is not in the PAM stack"
+    return Check("authselect", ok, detail, severity=severity)
+
+
 def authselect_profile() -> str:
     if not _have(AUTHSELECT):
         return ""
@@ -407,14 +458,7 @@ def prerequisites() -> list[Check]:
         )
     )
 
-    profile = authselect_profile()
-    checks.append(
-        Check(
-            "authselect",
-            profile.startswith("sssd"),
-            f"profile {profile}" if profile else "authselect not configured",
-        )
-    )
+    checks.append(authselect_check())
 
     # oddjobd is what creates a home directory on first domain login. Without it
     # a domain user logs in to a read-only profile and everything looks broken.
@@ -576,10 +620,7 @@ def domain_checks(user: Optional[str] = None) -> list[Check]:
     checks.append(Check("sssd", _service_active("sssd"), "identity provider"))
     checks.append(Check("oddjobd", _service_active("oddjobd"), "home directory creation"))
 
-    profile = authselect_profile()
-    checks.append(
-        Check("authselect", profile.startswith("sssd"), f"profile {profile}" or "unset")
-    )
+    checks.append(authselect_check())
 
     policy = login_policy()
     checks.append(
@@ -612,16 +653,37 @@ def domain_checks(user: Optional[str] = None) -> list[Check]:
 
     hostname = _run(["hostname", "-f"], timeout=30)
     fqdn = hostname.stdout.strip()
+    is_fqdn = bool(fqdn) and "." in fqdn
     # A single-label hostname cannot be resolved by the DC, and the join
-    # succeeds anyway — then nothing works and the cause is invisible.
+    # succeeds anyway -- then nothing works and the cause is invisible. That
+    # makes it a blocker *before* a join; on a machine that is already joined
+    # and working it is a latent risk, not a live fault, so it warns instead of
+    # pretending the machine is broken.
+    detail = fqdn or "unknown"
+    if not is_fqdn:
+        detail += " — set a fully qualified name with: hostnamectl set-hostname <host>.<domain>"
     checks.append(
-        Check(
-            "fully qualified hostname",
-            bool(fqdn) and "." in fqdn,
-            fqdn or "unknown",
-        )
+        Check("fully qualified hostname", is_fqdn, detail, severity="warning")
     )
     return checks
+
+
+def merge_checks(before: list[Check], after: list[Check]) -> list[Check]:
+    """One entry per check name, in first-seen order.
+
+    ``prerequisites()`` and ``domain_checks()`` both verify sssd, oddjobd and
+    the authselect profile -- before a join that is what the user needs to see,
+    after a join the membership-phase wording is the better one. Concatenating
+    them printed every shared line twice, which reads like two separate
+    problems and buries the real failures.
+    """
+    latest: dict[str, Check] = {}
+    order: list[str] = []
+    for check in before + after:
+        if check.name not in latest:
+            order.append(check.name)
+        latest[check.name] = check
+    return [latest[name] for name in order]
 
 
 def status(user: Optional[str] = None) -> dict:
@@ -629,7 +691,7 @@ def status(user: Optional[str] = None) -> dict:
     realms = joined_realms()
     prereq = prerequisites()
     post = domain_checks(user) if realms else []
-    all_checks = prereq + post
+    all_checks = merge_checks(prereq, post)
     blocking = [check for check in all_checks if not check.ok and check.severity == "required"]
     return {
         "joined": bool(realms),
@@ -874,6 +936,10 @@ def suggested_realm() -> str:
 __all__ = [
     "Check",
     "DomainError",
+    "PAM_FILES",
+    "authselect_check",
+    "merge_checks",
+    "pam_sss_configured",
     "Membership",
     "client_available",
     "OPTIONAL_PACKAGES",

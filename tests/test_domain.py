@@ -291,6 +291,100 @@ class TestStaleMemberships:
         assert domain.CLIENT_UNITS["winbind"] == "winbind.service"
 
 
+class TestAuthselectCheck:
+    """The profile *name* is not evidence; the PAM stack is.
+
+    Reported from a real machine: authselect said ``custom/fingerprint`` because
+    a fingerprint reader had been layered on, so the old name-only check failed
+    a box where pam_sss was in both PAM files and logins worked.
+    """
+
+    def test_custom_profile_with_pam_sss_passes(self, monkeypatch):
+        monkeypatch.setattr(domain, "authselect_profile", lambda: "custom/fingerprint")
+        monkeypatch.setattr(domain, "pam_sss_configured", lambda: True)
+        check = domain.authselect_check()
+        assert check.ok is True
+        assert "custom/fingerprint" in check.detail
+        assert "pam_sss" in check.detail
+
+    def test_custom_profile_without_pam_sss_fails(self, monkeypatch):
+        monkeypatch.setattr(domain, "authselect_profile", lambda: "custom/fingerprint")
+        monkeypatch.setattr(domain, "pam_sss_configured", lambda: False)
+        assert domain.authselect_check().ok is False
+
+    def test_plain_sssd_profile_passes_without_pam_probe(self, monkeypatch):
+        monkeypatch.setattr(domain, "authselect_profile", lambda: "sssd")
+        check = domain.authselect_check()
+        assert check.ok is True
+        assert check.detail == "profile sssd"
+
+    def test_no_profile_is_reported_as_unconfigured(self, monkeypatch):
+        monkeypatch.setattr(domain, "authselect_profile", lambda: "")
+        monkeypatch.setattr(domain, "pam_sss_configured", lambda: False)
+        check = domain.authselect_check()
+        assert check.ok is False
+        assert "not configured" in check.detail
+
+    def test_pam_sss_is_found_in_real_files(self, tmp_path, monkeypatch):
+        auth = tmp_path / "system-auth"
+        auth.write_text(
+            "#%PAM-1.0\n"
+            "auth  sufficient  pam_unix.so\n"
+            "auth  [default=1 ignore=ignore success=ok] pam_sss.so forward_pass\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(domain, "PAM_FILES", (str(auth),))
+        assert domain.pam_sss_configured() is True
+
+    def test_a_commented_pam_sss_line_does_not_count(self, tmp_path, monkeypatch):
+        """A commented module is not loaded, so it must not pass the check."""
+        auth = tmp_path / "system-auth"
+        auth.write_text(
+            "#auth sufficient pam_sss.so\n" "auth  sufficient  pam_unix.so\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(domain, "PAM_FILES", (str(auth),))
+        assert domain.pam_sss_configured() is False
+
+    def test_unreadable_pam_file_is_not_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(domain, "PAM_FILES", (str(tmp_path / "nope"),))
+        assert domain.pam_sss_configured() is False
+
+
+class TestChecksAreNotDuplicated:
+    """Both phases check sssd, oddjobd and authselect; the report printed each twice."""
+
+    def test_merge_keeps_one_entry_per_name(self):
+        before = [domain.Check("sssd", True, "identity provider")]
+        after = [
+            domain.Check("domain join", True, "REALM"),
+            domain.Check("sssd", True, "identity provider"),
+        ]
+        merged = domain.merge_checks(before, after)
+        assert [c.name for c in merged] == ["sssd", "domain join"]
+
+    def test_the_later_wording_wins(self):
+        before = [domain.Check("authselect", False, "profile custom")]
+        after = [domain.Check("authselect", True, "profile custom — pam_sss present")]
+        merged = domain.merge_checks(before, after)
+        assert len(merged) == 1
+        assert merged[0].ok is True
+        assert "pam_sss" in merged[0].detail
+
+    def test_status_reports_each_check_once(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: REALM_LIST_JOINED)
+        monkeypatch.setattr(domain, "client_available", lambda client: True)
+        monkeypatch.setattr(domain, "_service_active", lambda service: True)
+        monkeypatch.setattr(domain, "authselect_profile", lambda: "sssd")
+        monkeypatch.setattr(domain, "login_policy", lambda: {})
+        monkeypatch.setattr(
+            domain, "_run", lambda *a, **k: completed(stdout="box.example.com\n")
+        )
+
+        names = [check["name"] for check in domain.status()["checks"]]
+        assert len(names) == len(set(names)), f"duplicated checks: {names}"
+
+
 class TestLoginPolicyPicksTheLiveRealm:
     """The two entries disagree about policy, so picking the wrong one misleads.
 
