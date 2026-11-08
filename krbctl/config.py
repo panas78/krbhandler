@@ -43,6 +43,15 @@ DEFAULT_POLL_SECONDS = 30
 DEFAULT_WARN_MINUTES = 15
 DEFAULT_KEYTAB = "~/.keytab"
 
+# Keytabs seeding will consider. Deliberately user-scope only.
+#
+# "/etc/krb5.keytab" is the *machine* account (HOSTNAME$@REALM), not a user.
+# It is normally 0600 root:root so klist cannot read it and nothing seeds, but
+# if the app were ever run as root it would adopt the computer account and
+# offer to renew with a host TGT. A desktop ticket manager has no business
+# holding the machine's identity to the domain, so it is not a candidate.
+SEED_KEYTABS = (DEFAULT_KEYTAB, "~/.config/krb5.keytab")
+
 
 @dataclass
 class Account:
@@ -193,8 +202,10 @@ class Store:
 
         Zero-config on a machine that is already set up: no wizard, no typing a
         principal that the keytab itself already knows.
+
+        Only user keytabs are considered -- see SEED_KEYTABS.
         """
-        for candidate in (DEFAULT_KEYTAB, "~/.config/krb5.keytab", "/etc/krb5.keytab"):
+        for candidate in SEED_KEYTABS:
             expanded = os.path.expanduser(candidate)
             if not os.path.exists(expanded):
                 continue

@@ -262,6 +262,13 @@ First run fills this file in, in two steps, and you normally never edit it:
 | `~/.keytab` | `method: "keytab"`, `auto_renew: true` |
 | A live cache but no keytab | `method: "session"`, `auto_renew: false` |
 
+Only **user** keytabs are considered (`~/.keytab`, `~/.config/krb5.keytab`).
+`/etc/krb5.keytab` is deliberately ignored: that is the machine account
+(`HOSTNAME$@REALM`), i.e. the computer's own identity to the domain, not a
+user's. It is `0600 root:root` so an unprivileged run could not read it anyway,
+but a ticket manager should not hold a host's domain credential even when it
+could.
+
 The keytab wins because it is the only one of the two that supports unattended
 renewal. A `session` account is a ticket your login already obtained — SSSD puts
 AD tickets in `KCM:` or `KEYRING:` — so there is no secret for the app to hold

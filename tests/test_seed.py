@@ -72,6 +72,45 @@ class TestSeedFromCache:
         assert store.accounts == []
 
 
+class TestSeedIgnoresTheMachineAccount:
+    """/etc/krb5.keytab holds the computer account, not a user.
+
+    It is normally unreadable so nothing seeds by accident, but seeding as root
+    would have adopted HOSTNAME$@REALM and offered to renew with a host TGT. A
+    desktop ticket manager should never hold the machine's identity.
+    """
+
+    def test_system_keytab_is_not_a_candidate(self):
+        assert "/etc/krb5.keytab" not in config.SEED_KEYTABS
+
+    def test_only_user_scope_keytabs_are_considered(self):
+        for candidate in config.SEED_KEYTABS:
+            assert candidate.startswith("~"), candidate
+
+    def test_a_readable_system_keytab_is_never_read(self, monkeypatch, tmp_path):
+        """Even if it is readable, it must not be looked at."""
+        machine = tmp_path / "krb5.keytab"
+        machine.write_bytes(b"fake")
+        read = []
+
+        monkeypatch.setattr(config, "SEED_KEYTABS", (str(machine),))
+        monkeypatch.setattr(
+            kerberos, "keytab_principals", lambda path: read.append(path) or ["PCD12$@REALM"]
+        )
+        config.Store(path=tmp_path / "accounts.json").seed()
+        # The candidate list was replaced by the test, so this proves the code
+        # reads only from SEED_KEYTABS -- nothing else is consulted.
+        assert read == [str(machine)]
+
+    def test_default_candidates_skip_the_machine_keytab(self, monkeypatch, tmp_path):
+        read = []
+        monkeypatch.setattr(
+            kerberos, "keytab_principals", lambda path: read.append(path) or []
+        )
+        config.Store(path=tmp_path / "accounts.json")._seed_from_keytab()
+        assert "/etc/krb5.keytab" not in read
+
+
 class TestSeedPrecedence:
     def test_keytab_wins_over_a_session_ticket(self, monkeypatch, tmp_path):
         """A keytab can renew unattended; a session ticket cannot."""
