@@ -311,7 +311,14 @@ class Tray:
             "Id": ("s", "krbctl"),
             "Title": ("s", self.title),
             "Status": ("s", "Active"),
-            "IconName": ("s", "dialog-password-symbolic"),
+            # Deliberately empty. The icon is the state plate in IconPixmap, and
+            # a host that finds IconName set uses it *instead* of the pixmap --
+            # so any name here wins over the drawing and the state colour never
+            # appears. Noctalia showed a keyhole for weeks because this said
+            # "dialog-password-symbolic"; the plate only rendered once the name
+            # was empty. Emitting no name is the documented way to say "use the
+            # pixmap".
+            "IconName": ("s", ""),
             "IconPixmap": ("a(iiay)", pixmap),
             "OverlayIconName": ("s", ""),
             "AttentionIconName": ("s", ""),

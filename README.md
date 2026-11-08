@@ -321,6 +321,12 @@ is what plain `klist` does.
   keytab requires the VPN up and the correct password — it is not offline.
 * **Auto-renew never spends a stored password.** Only keytab accounts renew
   unattended; password accounts renew when you press the button.
+* **The tray icon must advertise no `IconName`.** The icon is the state plate,
+  drawn at runtime and shipped in `IconPixmap`. A StatusNotifierItem host that
+  finds `IconName` set draws that theme icon *instead* of the pixmap, so any
+  name here silently replaces the state colour — on Noctalia the name
+  `dialog-password-symbolic` showed up as a keyhole and the plate never
+  appeared. `IconName` is deliberately the empty string.
 
 ## Requirements
 
