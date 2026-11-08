@@ -170,32 +170,59 @@ class TestRealmDetails:
         assert payload["realms_detail"][1]["login_formats"] == "%U@diastasys.gr"
 
 
+def both_clients_installed(monkeypatch):
+    """Pretend winbind and sssd are both installed."""
+    monkeypatch.setattr(domain, "client_available", lambda client: True)
+
+
+def only_sssd_installed(monkeypatch):
+    """The real state on a machine with a leftover smb.conf: no winbind."""
+    monkeypatch.setattr(domain, "client_available", lambda client: client == "sssd")
+
+
 class TestDuplicateMemberships:
+    """Two *installed* clients on one domain.
+
+    This is the genuinely dangerous case: each client keeps its own copy of the
+    machine account password and rotates it independently, so a stale copy ends
+    as "the trust relationship failed".
+    """
+
     def test_detects_the_same_realm_joined_twice(self, monkeypatch):
         monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
-        duplicates = domain.duplicate_memberships(domain.realm_details())
-        assert duplicates == ["diastasys.gr, Diastasys.gr"]
+        both_clients_installed(monkeypatch)
+        assert domain.duplicate_memberships() == ["diastasys.gr, Diastasys.gr"]
 
     def test_case_difference_still_counts_as_the_same_realm(self, monkeypatch):
         """The realm-name is what identifies it, not the spelling used to join."""
         monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        both_clients_installed(monkeypatch)
         details = domain.realm_details()
         assert details[0].raw["realm-name"].lower() == details[1].raw["realm-name"].lower()
 
     def test_single_membership_is_not_a_duplicate(self, monkeypatch):
         monkeypatch.setattr(domain, "_realm_list_text", lambda: REALM_LIST_JOINED)
-        assert domain.duplicate_memberships(domain.realm_details()) == []
+        both_clients_installed(monkeypatch)
+        assert domain.duplicate_memberships() == []
 
-    def test_two_different_realms_are_not_duplicates(self):
+    def test_two_different_realms_are_not_duplicates(self, monkeypatch):
         text = (
             "ONE.COM\n  realm-name: ONE.COM\n  client-software: sssd\n"
             "TWO.COM\n  realm-name: TWO.COM\n  client-software: sssd\n"
         )
+        both_clients_installed(monkeypatch)
         assert domain.duplicate_memberships(domain.parse_realm_list(text)) == []
+
+    def test_a_client_that_is_not_installed_is_not_a_duplicate(self, monkeypatch):
+        """The bug this replaced: a leftover smb.conf was counted as a client."""
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        only_sssd_installed(monkeypatch)
+        assert domain.duplicate_memberships() == []
 
     def test_double_join_is_a_warning_not_a_blocker(self, monkeypatch):
         """Tickets still work; only the identity lookup is ambiguous."""
         monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        both_clients_installed(monkeypatch)
         monkeypatch.setattr(domain, "_service_active", lambda service: True)
         monkeypatch.setattr(domain, "authselect_profile", lambda: "sssd")
         monkeypatch.setattr(domain, "login_policy", lambda: {})
@@ -204,8 +231,107 @@ class TestDuplicateMemberships:
         checks = {check.name: check for check in domain.domain_checks()}
         assert checks["memberships"].ok is False
         assert checks["memberships"].severity == "warning"
-        assert "winbind" in checks["memberships"].detail
-        assert "sssd" in checks["memberships"].detail
+        assert "joined twice" in checks["memberships"].detail
+        assert "leave one and rejoin" in checks["memberships"].detail
+
+
+class TestStaleMemberships:
+    """An entry whose client is not installed.
+
+    ``realm list`` reads each client's config file, so a leftover smb.conf makes
+    realmd report a winbind membership on a machine that has no winbind. The
+    advice for this is *not* a rejoin -- nothing is competing.
+    """
+
+    def test_flags_the_entry_whose_client_is_missing(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        only_sssd_installed(monkeypatch)
+
+        stale = domain.stale_memberships()
+        assert [member.name for member in stale] == ["diastasys.gr"]
+        assert stale[0].client == "winbind"
+        assert stale[0].live is False
+
+    def test_live_membership_is_not_stale(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        only_sssd_installed(monkeypatch)
+
+        live = [member for member in domain.memberships() if member.live]
+        assert [member.name for member in live] == ["Diastasys.gr"]
+
+    def test_only_one_membership_counts_as_live(self, monkeypatch):
+        """So the window shows one realm, not "x (winbind), X (sssd)"."""
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        only_sssd_installed(monkeypatch)
+        assert len([m for m in domain.memberships() if m.live]) == 1
+
+    def test_check_says_leftover_config_not_rejoin(self, monkeypatch):
+        """The old wording told a machine in this state to rejoin, which is wrong."""
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        only_sssd_installed(monkeypatch)
+        monkeypatch.setattr(domain, "_service_active", lambda service: True)
+        monkeypatch.setattr(domain, "authselect_profile", lambda: "sssd")
+        monkeypatch.setattr(domain, "login_policy", lambda: {})
+        monkeypatch.setattr(domain, "_run", lambda *a, **k: completed(stdout="box.example.com\n"))
+
+        checks = {check.name: check for check in domain.domain_checks()}
+        detail = checks["memberships"].detail
+        assert checks["memberships"].severity == "warning"
+        assert "not installed" in detail
+        assert "leftover" in detail
+        assert "rejoin" not in detail
+        assert "realm leave" in detail
+
+    def test_unknown_client_is_not_assumed_missing(self):
+        """Guessing "not installed" for a client we do not know would invent a problem."""
+        assert domain.client_available("somefutureclient") is True
+
+    def test_unit_mapping_covers_both_known_clients(self):
+        assert domain.CLIENT_UNITS["sssd"] == "sssd.service"
+        assert domain.CLIENT_UNITS["winbind"] == "winbind.service"
+
+
+class TestLoginPolicyPicksTheLiveRealm:
+    """The two entries disagree about policy, so picking the wrong one misleads.
+
+    In the captured output the stale winbind entry says allow-any-login and the
+    live sssd entry says allow-realm-logins. Reporting the stale one tells the
+    user anyone may log in when the machine actually restricts them.
+    """
+
+    def test_reads_the_policy_of_the_installed_client(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        only_sssd_installed(monkeypatch)
+        assert domain.login_policy().get("login-policy") == "allow-realm-logins"
+
+    def test_not_the_first_entry_blindly(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        only_sssd_installed(monkeypatch)
+        assert domain.login_policy().get("login-policy") != "allow-any-login"
+
+    def test_empty_when_nothing_is_installed(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        monkeypatch.setattr(domain, "client_available", lambda client: False)
+        assert domain.login_policy() == {}
+
+
+class TestClientAvailability:
+    def test_winbind_unit_absence_means_not_installed(self, monkeypatch):
+        monkeypatch.setattr(
+            domain, "_unit_exists", lambda unit: unit != "winbind.service"
+        )
+        assert domain.client_available("winbind") is False
+        assert domain.client_available("sssd") is True
+
+    def test_status_reports_client_installed_per_realm(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        only_sssd_installed(monkeypatch)
+        monkeypatch.setattr(domain, "prerequisites", lambda: [])
+        monkeypatch.setattr(domain, "domain_checks", lambda user=None: [])
+
+        payload = domain.status()
+        flags = {item["name"]: item["client_installed"] for item in payload["realms_detail"]}
+        assert flags == {"diastasys.gr": False, "Diastasys.gr": True}
 
 
 class TestLoginPolicy:

@@ -127,11 +127,21 @@ krbctl domain leave            # leave
 so a provisioning script can gate on `ready`.
 
 The Domain row names the client software per realm — `Joined to example.com
-(sssd)`. If the same domain was joined twice under different spellings, it says
-so: two memberships mean two identity clients can answer a lookup, and which one
-wins depends on the PAM stack. That is the condition behind a graphical login
-that authenticates and then drops straight back to the greeter while a shell
-login works fine.
+(sssd)`.
+
+`realm list` is not the whole truth, because it enumerates joined realms by
+reading each client's config file. A leftover `/etc/samba/smb.conf` with
+`security = ADS` therefore makes it report a winbind membership on a machine
+with no winbind installed. krbctl checks whether each named client's systemd
+unit actually exists, so:
+
+* a **live** membership is shown in the row and is what `Leave` targets;
+* an entry whose client is missing is called out as leftover config, not a
+  second join — the repair is to deal with the stray config file, **not** to
+  rejoin;
+* if **two installed clients** really do hold one domain, that is the dangerous
+  case and it says so: both rotate the machine account password independently,
+  so a stale copy ends as "the trust relationship failed".
 
 The joining password never reaches `realm`. It is used to obtain a Kerberos
 ticket for the joining account, and realmd then runs with `--no-password

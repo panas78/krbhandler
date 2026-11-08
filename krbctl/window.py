@@ -694,28 +694,37 @@ class MainWindow(Adw.ApplicationWindow):
         open, and a stale "Join…" button on a joined machine invites a duplicate
         join.
         """
-        details = domain.realm_details()
-        if details:
-            # Name the backend per realm: two memberships using different
-            # clients (winbind and sssd against the same domain) is the
-            # condition that breaks graphical logins, and "Joined to x, X"
-            # alone hides it.
-            labelled = ", ".join(
-                f"{realm.name} ({realm.client_software})" if realm.client_software else realm.name
-                for realm in details
-            )
+        memberships = domain.memberships()
+        live = [member for member in memberships if member.live]
+        stale = [member for member in memberships if not member.live]
+
+        if live:
+            # Only name memberships whose client is installed. An entry realmd
+            # listed from a leftover config file is not a membership this
+            # machine actually has, and showing it as one turns a tidy row into
+            # "Joined to x, X (winbind), X (sssd)".
+            labelled = ", ".join(f"{member.name} ({member.client})" for member in live)
             self._domain_row.set_title(f"Joined to {labelled}")
 
-            duplicates = domain.duplicate_memberships(details)
-            policy = domain.login_policy().get("login-policy", "login policy unknown")
+            notes = [domain.login_policy().get("login-policy", "login policy unknown")]
+            duplicates = domain.duplicate_memberships()
             if duplicates:
-                self._domain_row.set_subtitle(
-                    f"{policy} — same domain joined twice; leave once and rejoin"
-                )
-            else:
-                self._domain_row.set_subtitle(policy)
+                notes.append(f"same domain joined twice: {'; '.join(duplicates)}")
+            if stale:
+                names = ", ".join(f"{member.name} ({member.client})" for member in stale)
+                notes.append(f"{names} is a leftover config file, not a join")
+            self._domain_row.set_subtitle(" — ".join(notes))
             self._domain_action.set_label("Leave")
+        elif memberships:
+            # Nothing installed, yet realmd lists something: the machine is not
+            # really joined, so offer a join rather than a leave.
+            self._domain_row.set_title("Not joined")
+            self._domain_row.set_subtitle("realm bookkeeping is stale — leftover client config")
+            self._domain_action.set_label("Join…")
         else:
+            self._domain_row.set_title("Not joined")
+            self._domain_row.set_subtitle("")
+            self._domain_action.set_label("Join…")
             self._domain_row.set_title("Not joined")
             missing = domain.missing_packages()
             self._domain_row.set_subtitle(
@@ -732,10 +741,14 @@ class MainWindow(Adw.ApplicationWindow):
         DomainWindow(self, on_done=self.reload).present()
 
     def _on_leave_domain(self) -> None:
-        realms = domain.joined_realms()
-        if not realms:
+        # Leave the membership whose client is installed. joined_realms() lists
+        # what realmd reports, which can include an entry backed only by a
+        # leftover config file -- leaving that name would either fail or, worse,
+        # report success while the real join stays in place.
+        live = [member for member in domain.memberships() if member.live]
+        if not live:
             return
-        realm_name = realms[0]
+        realm_name = live[0].name
 
         dialog = Adw.MessageDialog(
             transient_for=self,

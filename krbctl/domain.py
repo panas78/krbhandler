@@ -65,6 +65,10 @@ OPTIONAL_PACKAGES = ("pcsc-lite",)  # smartcard logon
 # nobody approved the operation, so nothing happened.
 _PKEXEC_DENIED = (126, 127)
 
+# Which systemd unit proves an identity client is installed. Used to tell a real
+# membership from a config file that realmd found and described.
+CLIENT_UNITS = {"sssd": "sssd.service", "winbind": "winbind.service"}
+
 
 class DomainError(RuntimeError):
     """A domain operation failed. ``hint`` carries the next step for the user."""
@@ -337,13 +341,25 @@ def joined_realms() -> list[str]:
 
 
 def login_policy() -> dict[str, str]:
-    """The ``login-policy:`` style properties of the joined realm."""
+    """The ``login-policy:`` style properties of the realm we are really joined to.
+
+    Reads the first membership whose client is installed. Taking the first entry
+    outright reports the policy of a leftover config file — on a machine with a
+    stale winbind entry that means showing that realm's ``allow-any-login`` while
+    the live sssd membership actually enforces ``allow-realm-logins``, i.e. the
+    window would overstate who can log in.
+    """
+    live = [member for member in memberships() if member.live]
+    if not live:
+        return {}
     policy: dict[str, str] = {}
-    for realm in parse_realm_list(_realm_list_text()):
+    for realm in realm_details():
+        if realm.name != live[0].name:
+            continue
         for key in ("login-policy", "configured", "domain-name"):
             if key in realm.raw:
                 policy[key] = realm.raw[key]
-        break  # the policy belongs to the realm we are joined to
+        break
     return policy
 
 
@@ -425,18 +441,89 @@ def prerequisites() -> list[Check]:
     return checks
 
 
-def duplicate_memberships(realms: list[RealmInfo]) -> list[str]:
-    """Realm names joined more than once (compared case-insensitively).
+def _unit_exists(unit: str) -> bool:
+    """Whether a systemd unit file exists at all — installed, not necessarily active."""
+    if not _have(SYSTEMCTL):
+        return False
+    return _run([SYSTEMCTL, "cat", unit], timeout=30).returncode == 0
 
-    Two memberships of the same domain mean two clients can answer an identity
-    lookup, and which one wins depends on the PAM stack — so authentication can
-    succeed in one component while another cannot find the user.
+
+def client_available(client: str) -> bool:
+    """Is this identity client actually installed on this machine?
+
+    Unknown clients return True: guessing "not installed" for something we do
+    not recognise would invent a problem.
+    """
+    unit = CLIENT_UNITS.get(client)
+    if unit is None:
+        return True
+    return _unit_exists(unit)
+
+
+@dataclass
+class Membership:
+    """One line of ``realm list``, with whether its client really exists.
+
+    ``realm list`` enumerates joined realms by reading the config file of each
+    client — sssd.conf for sssd, smb.conf for winbind. A leftover file therefore
+    produces an entry for a client that is not installed, which reads as a
+    duplicate join but is not one.
+    """
+
+    name: str
+    realm_name: str
+    client: str
+    live: bool
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "realm_name": self.realm_name,
+            "client": self.client,
+            "live": self.live,
+        }
+
+
+def memberships(realms: Optional[list[RealmInfo]] = None) -> list[Membership]:
+    """Every ``realm list`` entry, annotated with whether its client is installed."""
+    if realms is None:
+        realms = realm_details()
+    return [
+        Membership(
+            name=realm.name,
+            realm_name=realm.raw.get("realm-name", ""),
+            client=realm.client_software or "unknown",
+            live=client_available(realm.client_software),
+        )
+        for realm in realms
+    ]
+
+
+def duplicate_memberships(realms: Optional[list[RealmInfo]] = None) -> list[str]:
+    """Realm names with more than one *installed* client.
+
+    Only live memberships count. Two real clients on one domain means either can
+    answer an identity lookup and each keeps its own copy of the machine account
+    password, so which one wins depends on the PAM stack and a stale copy can
+    break the trust relationship. An entry whose client is not installed is a
+    leftover config file, not a conflict.
     """
     seen: dict[str, list[str]] = {}
-    for realm in realms:
-        key = (realm.raw.get("realm-name") or realm.name).lower()
-        seen.setdefault(key, []).append(realm.name)
-    return [name for names in seen.values() if len(names) > 1 for name in [", ".join(names)]]
+    for member in memberships(realms):
+        if not member.live:
+            continue
+        key = (member.realm_name or member.name).lower()
+        seen.setdefault(key, []).append(member.name)
+    return [", ".join(names) for names in seen.values() if len(names) > 1]
+
+
+def stale_memberships(realms: Optional[list[RealmInfo]] = None) -> list[Membership]:
+    """Entries realmd lists whose client is not installed.
+
+    Harmless for logins, but they make ``realm list`` lie and can send
+    ``realm leave`` after the wrong name.
+    """
+    return [member for member in memberships(realms) if not member.live]
 
 
 def domain_checks(user: Optional[str] = None) -> list[Check]:
@@ -451,21 +538,40 @@ def domain_checks(user: Optional[str] = None) -> list[Check]:
         return checks
 
     details = realm_details()
-    clients = sorted({realm.client_software or "unknown" for realm in details})
-    duplicates = duplicate_memberships(details)
     if len(details) > 1:
-        # Worth a warning, not a blocker: Kerberos tickets still work, but the
-        # machine has two identities stacks that can disagree about who a user
-        # is.
-        checks.append(
-            Check(
-                "memberships",
-                not duplicates,
-                f"{len(details)} realms ({', '.join(clients)})"
-                + (f" — same domain joined twice: {'; '.join(duplicates)}" if duplicates else ""),
-                severity="warning",
+        stale = stale_memberships(details)
+        duplicates = duplicate_memberships(details)
+        if stale:
+            # Not a conflict: the client named in the entry is not installed, so
+            # nothing is competing. Say what to look at instead of suggesting a
+            # rejoin, which would be the wrong repair.
+            names = ", ".join(f"{member.name} ({member.client})" for member in stale)
+            checks.append(
+                Check(
+                    "memberships",
+                    False,
+                    f"{names} listed but {stale[0].client} is not installed "
+                    "— leftover client config, not a second join. "
+                    "`realm leave` may fail to remove it",
+                    severity="warning",
+                )
             )
-        )
+        elif duplicates:
+            # Genuinely two clients on one domain: both rotate the machine
+            # account password, and a stale copy breaks the trust relationship.
+            checks.append(
+                Check(
+                    "memberships",
+                    False,
+                    f"same domain joined twice: {'; '.join(duplicates)} "
+                    "— leave one and rejoin",
+                    severity="warning",
+                )
+            )
+        else:
+            checks.append(
+                Check("memberships", True, f"{len(details)} memberships, one per domain")
+            )
 
     checks.append(Check("sssd", _service_active("sssd"), "identity provider"))
     checks.append(Check("oddjobd", _service_active("oddjobd"), "home directory creation"))
@@ -536,6 +642,7 @@ def status(user: Optional[str] = None) -> dict:
                 "client_software": realm.client_software,
                 "login_formats": realm.raw.get("login-formats", ""),
                 "login_policy": realm.raw.get("login-policy", ""),
+                "client_installed": client_available(realm.client_software),
             }
             for realm in realm_details()
         ],
@@ -767,6 +874,8 @@ def suggested_realm() -> str:
 __all__ = [
     "Check",
     "DomainError",
+    "Membership",
+    "client_available",
     "OPTIONAL_PACKAGES",
     "REQUIRED_PACKAGES",
     "RealmInfo",
@@ -778,8 +887,10 @@ __all__ = [
     "joined_realms",
     "leave",
     "login_policy",
+    "memberships",
     "missing_packages",
     "duplicate_memberships",
+    "stale_memberships",
     "parse_discover",
     "parse_realm_list",
     "permit_all",
