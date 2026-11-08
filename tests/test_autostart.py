@@ -71,6 +71,9 @@ class TestEnable:
         # io.github.pan.Krbctl.desktop.
         assert entry["NoDisplay"] == "true"
         assert entry["X-GNOME-Autostart-enabled"] == "true"
+        # The name is generated, not copied from a file, so a rename has to
+        # travel through APP_NAME or this entry keeps the old one forever.
+        assert entry["Name"] == f"{autostart.APP_NAME} (tray)"
 
     def test_enable_reports_enabled(self, launcher):
         autostart.enable(launcher)

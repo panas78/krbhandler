@@ -26,7 +26,7 @@ gi.require_version("Gio", "2.0")
 gi.require_version("GLib", "2.0")
 from gi.repository import Gio, GLib  # noqa: E402
 
-from . import icons  # noqa: E402
+from . import APP_NAME, icons  # noqa: E402
 
 SNI_IFACE = "org.kde.StatusNotifierItem"
 MENU_IFACE = "com.canonical.dbusmenu"
@@ -193,7 +193,7 @@ class Tray:
     def __init__(
         self,
         app_id: str,
-        title: str = "Kerberos Tickets",
+        title: str = APP_NAME,
         on_activate: Optional[Callable[[], None]] = None,
         on_secondary: Optional[Callable[[], None]] = None,
     ):

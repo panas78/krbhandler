@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Kerberos Tickets
+Name=Kerberos Handler
 GenericName=Kerberos Ticket Manager
 Comment=Keep your Kerberos ticket alive and see when it expires
 Exec=@BINDIR@/krbctl window

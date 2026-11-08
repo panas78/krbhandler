@@ -17,7 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
-from . import autostart, config, domain, icons, kerberos, secrets  # noqa: E402
+from . import APP_NAME, autostart, config, domain, icons, kerberos, secrets  # noqa: E402
 from .config import METHOD_KEYTAB, METHOD_PASSWORD, METHOD_SESSION, Account  # noqa: E402
 
 CSS = """
@@ -512,7 +512,7 @@ class MainWindow(Adw.ApplicationWindow):
     """Account list, live ticket state, and the manual actions."""
 
     def __init__(self, app: Adw.Application, store: config.Store):
-        super().__init__(application=app, title="Kerberos Tickets")
+        super().__init__(application=app, title=APP_NAME)
         self.set_default_size(560, 680)
         self.store = store
         self._statuses: dict[str, kerberos.Status] = {}
@@ -552,7 +552,7 @@ class MainWindow(Adw.ApplicationWindow):
         # window is wide enough and turns into a bottom bar when it is not, so
         # the same code works at either size.
         self._stack = Adw.ViewStack()
-        self._switcher_title = Adw.ViewSwitcherTitle(title="Kerberos Tickets")
+        self._switcher_title = Adw.ViewSwitcherTitle(title=APP_NAME)
         self._switcher_title.set_stack(self._stack)
         header.set_title_widget(self._switcher_title)
 
@@ -628,7 +628,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         about = Adw.AboutWindow(
             transient_for=self,
-            application_name="Kerberos Tickets",
+            application_name=APP_NAME,
             application_icon="krbctl",
             version=__version__,
             developer_name="Panagiotis Perivolaris",

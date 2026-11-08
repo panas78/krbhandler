@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
   <id>io.github.pan.Krbctl</id>
-  <name>Kerberos Tickets</name>
+  <name>Kerberos Handler</name>
   <summary>Keep your Kerberos ticket alive and see when it expires</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>

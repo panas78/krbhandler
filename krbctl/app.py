@@ -22,7 +22,7 @@ gi.require_version("Adw", "1")
 gi.require_version("Gio", "2.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import config, kerberos  # noqa: E402
+from . import APP_NAME, config, kerberos  # noqa: E402
 from .config import METHOD_KEYTAB  # noqa: E402
 from .tray import MenuItem, Tray  # noqa: E402
 from .window import MainWindow, run_async  # noqa: E402
@@ -95,7 +95,7 @@ class KrbApplication(Adw.Application):
     def _start_tray(self) -> None:
         self.tray = Tray(
             app_id=self.get_application_id() or "krbctl",
-            title="Kerberos Tickets",
+            title=APP_NAME,
             on_activate=self.show_window,
         )
         self.tray.start()
@@ -200,7 +200,7 @@ class KrbApplication(Adw.Application):
         # away. Mirroring it here made the menu a second, smaller copy of the
         # Tickets tab that always drifted behind it.
         items: list[MenuItem] = [
-            MenuItem(id=1, label="Open Kerberos Tickets", action=ACT_WINDOW),
+            MenuItem(id=1, label=f"Open {APP_NAME}", action=ACT_WINDOW),
             MenuItem(id=2, label="Quit", action=ACT_QUIT),
         ]
 

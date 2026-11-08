@@ -21,6 +21,8 @@ from configparser import RawConfigParser
 from pathlib import Path
 from typing import Optional
 
+from . import APP_NAME
+
 ENTRY_NAME = "krbctl-tray.desktop"
 SECTION = "Desktop Entry"
 
@@ -29,7 +31,7 @@ SECTION = "Desktop Entry"
 _ENTRY_TEMPLATE = """\
 [Desktop Entry]
 Type=Application
-Name=Kerberos Tickets (tray)
+Name={name} (tray)
 GenericName=Kerberos Ticket Manager
 Comment=Kerberos ticket tray icon for Noctalia, Waybar, KDE and GNOME AppIndicator
 Exec={binary} tray
@@ -84,6 +86,7 @@ def launcher() -> Optional[str]:
 
 def _entry_text(binary: str, *, enabled: bool = True, hidden: bool = False) -> str:
     return _ENTRY_TEMPLATE.format(
+        name=APP_NAME,
         binary=binary,
         gnome_enabled="true" if enabled else "false",
         hidden_line="Hidden=true\n" if hidden else "",

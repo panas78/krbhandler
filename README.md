@@ -1,4 +1,4 @@
-# krbctl — Kerberos tickets for the Linux desktop
+# krbctl — Kerberos Handler for the Linux desktop
 
 A tray icon and a native GTK4 window for MIT Kerberos. It answers the two
 questions you actually have — *is my ticket still good?* and *please renew it* —
@@ -27,7 +27,7 @@ for every state, so it reads as one indicator that changes hue rather than as
 five unrelated icons. It is drawn at runtime by `krbctl/icons.py` — a few dozen
 lines of cairo, no artwork and no files to load.
 
-Clicking it gives two entries: **Open Kerberos Tickets** and **Quit**. Everything
+Clicking it gives two entries: **Open Kerberos Handler** and **Quit**. Everything
 about a ticket — its state, renewing, destroying, removing — is in the window, so
 mirroring it in the menu only produced a smaller copy that lagged behind.
 
@@ -49,7 +49,7 @@ That is this app.
 | | |
 |---|---|
 | **Live state** | valid / expiring / expired / no ticket / cache error, polled every 30 s |
-| **Tray icon** | StatusNotifierItem with a state-coloured key, a tooltip, and a two-entry menu: *Open Kerberos Tickets* and *Quit* |
+| **Tray icon** | StatusNotifierItem with a state-coloured key, a tooltip, and a two-entry menu: *Open Kerberos Handler* and *Quit* |
 | **Native window** | GTK4 + libadwaita; accounts, ticket detail, renew, destroy |
 | **Auto-renew** | renews from the keytab when the ticket is inside the warning window |
 | **Backoff** | a failing renewal backs off 5 minutes instead of hammering a dead KDC |

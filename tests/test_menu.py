@@ -95,7 +95,7 @@ def test_menu_has_exactly_two_entries(controller):
 def test_menu_is_open_and_quit(controller):
     root = controller.tray.items[0]
     assert [child.label for child in root.children] == [
-        "Open Kerberos Tickets",
+        f"Open {app_module.APP_NAME}",
         "Quit",
     ]
 
@@ -110,7 +110,7 @@ def test_menu_has_no_per_account_entries(controller):
     controller._refresh_menu()
 
     labels = [label for label, _ in labels_of(controller.tray.items)]
-    assert labels == ["Open Kerberos Tickets", "Quit"]
+    assert labels == [f"Open {app_module.APP_NAME}", "Quit"]
     assert not any(label and "Renew" in label for label in labels)
 
 
@@ -127,7 +127,7 @@ def test_menu_does_not_change_with_ticket_state(controller):
         controller._statuses[account.id] = kerberos.Status(state=state)
         controller._refresh_menu()
         labels = [label for label, _ in labels_of(controller.tray.items)]
-        assert labels == ["Open Kerberos Tickets", "Quit"], state
+        assert labels == [f"Open {app_module.APP_NAME}", "Quit"], state
 
 
 def test_menu_entries_are_wired_to_actions(controller):
@@ -161,6 +161,11 @@ def test_quit_entry_quits(controller, monkeypatch):
 
     controller.tray.actions[app_module.ACT_QUIT]()
     assert called == [True]
+
+
+def test_tray_title_is_the_product_name(controller):
+    """The window list and the tooltip both read this title."""
+    assert app_module.Tray(app_id="krbctl-probe").title == app_module.APP_NAME
 
 
 def test_tray_has_no_secondary_action(controller):
