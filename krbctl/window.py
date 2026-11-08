@@ -73,6 +73,10 @@ class EditorWindow(Adw.Window):
     ``ktutil`` incantation from the user's life, which was the whole point.
     """
 
+    # Row order in the Method combo, and therefore the mapping to the stored
+    # method value. One place, so the two cannot drift.
+    _METHOD_ORDER = (METHOD_KEYTAB, METHOD_PASSWORD, METHOD_SESSION)
+
     def __init__(
         self,
         parent: Gtk.Window,
@@ -190,10 +194,6 @@ class EditorWindow(Adw.Window):
 
     # ── behaviour ─────────────────────────────────────────────
 
-    # Row order in the Method combo, and therefore the mapping to the stored
-    # method value. Kept in one place so the two cannot drift.
-    _METHOD_ORDER = (METHOD_KEYTAB, METHOD_PASSWORD, METHOD_SESSION)
-
     def _method(self) -> str:
         index = self.method_row.get_selected()
         if 0 <= index < len(self._METHOD_ORDER):
@@ -215,12 +215,15 @@ class EditorWindow(Adw.Window):
         # password field nor the keyring switch applies to it.
         self.password_row.set_visible(not keytab and not session)
         self.remember_row.set_visible(not keytab and not session)
-        if not self._uses_keytab() and not session and self._existing:
-            # Never re-ask for a password we already hold.
-            if secrets.lookup_password(self._existing.principal):
-                self.password_row.set_placeholder_text("Stored in keyring — leave empty to keep")
-            else:
-                self.password_row.set_placeholder_text("Needed to sign in")
+        if not keytab and not session and self._existing:
+            # Never re-ask for a password we already hold. Adw.EntryRow has no
+            # placeholder property, so the hint goes on the row like the
+            # principal and cache rows above.
+            self.password_row.set_tooltip_text(
+                "Stored in the keyring — leave empty to keep"
+                if secrets.lookup_password(self._existing.principal)
+                else "Needed to sign in"
+            )
 
     def _browse_keytab(self, _button: Gtk.Button) -> None:
         dialog = Gtk.FileDialog(title="Select keytab")
@@ -287,7 +290,7 @@ class EditorWindow(Adw.Window):
             id=self._existing.id if self._existing else "",
             principal=principal,
             label=self.label_row.get_text().strip() or principal,
-            method=METHOD_KEYTAB if keytab else (METHOD_SESSION if self._is_session() else METHOD_PASSWORD),
+            method=self._method(),
             keytab=(self.keytab_row.get_text().strip() or config.DEFAULT_KEYTAB) if keytab else "",
             cache=self.cache_row.get_text().strip(),
             auto_renew=self.auto_row.get_active(),
