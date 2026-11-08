@@ -516,7 +516,14 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_default_size(560, 680)
         self.store = store
         self._statuses: dict[str, kerberos.Status] = {}
-        self._groups: dict[str, Adw.PreferencesGroup] = {}
+        # Every account group ever added, in order, as (account id, group).
+        #
+        # A dict keyed by account id looked tidier, but two accounts sharing an
+        # id (which seeding can produce) overwrite each other there: the earlier
+        # group stays on the page while nothing tracks it, so rebuild() cannot
+        # detach it and it is never updated again. It renders forever as a stale
+        # duplicate stuck on "Reading ticket...". A list cannot lose an entry.
+        self._groups: list[tuple[str, Adw.PreferencesGroup]] = []
         self._empty_rows: list[Gtk.Widget] = []
 
         self._toasts = Adw.ToastOverlay()
@@ -636,17 +643,23 @@ class MainWindow(Adw.ApplicationWindow):
         self.rebuild()
 
     def _detach(self, widget: Gtk.Widget) -> None:
-        """Remove a widget from the page only if it is actually there.
+        """Remove a widget from the page, but only if it is attached.
 
-        adw_preferences_page_remove() logs a critical and keeps going when the
-        child is not attached, which on the first rebuild means a burst of
-        warnings for groups that were never added yet.
+        ``AdwPreferencesPage`` does not parent its children directly: ``add()``
+        puts them inside an internal ``GtkBox``, so ``widget.get_parent()`` is
+        that box and never the page itself. Testing against the page therefore
+        never matched, nothing was ever removed, and each ``rebuild()`` appended
+        another copy of every group -- the window grew a duplicate account (and
+        a second Domain and Startup section) per rebuild.
+
+        Any parent at all is the right test: the only parents these widgets can
+        have are this page's internal box.
         """
-        if widget.get_parent() is self._page:
+        if widget.get_parent() is not None:
             self._page.remove(widget)
 
     def rebuild(self) -> None:
-        for group in list(self._groups.values()):
+        for _account_id, group in self._groups:
             self._detach(group)
         self._groups.clear()
         # AdwPreferencesGroup has no clear(); get_first_child() hands back its
@@ -869,7 +882,7 @@ class MainWindow(Adw.ApplicationWindow):
         destroy_button = Gtk.Button(label="Destroy")
         destroy_button.set_valign(Gtk.Align.CENTER)
         destroy_button.add_css_class("destructive-action")
-        destroy_button.connect("clicked", lambda *_: self.destroy(account))
+        destroy_button.connect("clicked", lambda *_: self.destroy_ticket(account))
         destroy.add_suffix(destroy_button)
         group.add(destroy)
 
@@ -882,7 +895,7 @@ class MainWindow(Adw.ApplicationWindow):
         group.add(remove)
 
         self._page.add(group)
-        self._groups[account.id] = group
+        self._groups.append((account.id, group))
 
         # Stash the widgets that the poller updates.
         group._badge = badge  # type: ignore[attr-defined]
@@ -901,9 +914,15 @@ class MainWindow(Adw.ApplicationWindow):
         self._sync_startup_row()
 
     def _render_state(self, account: Account, status: Optional[kerberos.Status]) -> None:
-        group = self._groups.get(account.id)
-        if group is None:
-            return
+        # Match on id, and update *every* group carrying it: if two ever share an
+        # id, both should show the real state rather than one lingering on "…".
+        for account_id, group in self._groups:
+            if account_id == account.id:
+                self._render_group(group, status)
+
+    def _render_group(
+        self, group: Adw.PreferencesGroup, status: Optional[kerberos.Status]
+    ) -> None:
         badge: Gtk.Label = group._badge  # type: ignore[attr-defined]
         image: Gtk.Image = group._image  # type: ignore[attr-defined]
         details: Adw.ActionRow = group._details  # type: ignore[attr-defined]
@@ -964,7 +983,13 @@ class MainWindow(Adw.ApplicationWindow):
 
         run_async(work, ok, fail)
 
-    def destroy(self, account: Account) -> None:
+    def destroy_ticket(self, account: Account) -> None:
+        """Sign out of one account.
+
+        Not called ``destroy``: that is ``Gtk.Widget.destroy()``, and shadowing
+        it with a different signature breaks any caller that destroys the window
+        the normal way.
+        """
         def work():
             kerberos.destroy(account.cache or None)
             return kerberos.status(account.cache or None, warn_minutes=account.warn_minutes)

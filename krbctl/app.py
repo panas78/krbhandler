@@ -266,7 +266,7 @@ class KrbApplication(Adw.Application):
         if account is None:
             return
         if self.window is not None:
-            self.window.destroy(account)
+            self.window.destroy_ticket(account)
         self._schedule_poll(immediate=True)
 
     def _menu_details(self) -> None:

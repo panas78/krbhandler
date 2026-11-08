@@ -30,13 +30,14 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
+from krbctl import config, kerberos  # noqa: E402
 from krbctl.config import (  # noqa: E402
     METHOD_KEYTAB,
     METHOD_PASSWORD,
     METHOD_SESSION,
     Account,
 )
-from krbctl.window import EditorWindow  # noqa: E402
+from krbctl.window import EditorWindow, MainWindow  # noqa: E402
 
 
 @pytest.fixture
@@ -101,6 +102,127 @@ def test_editing_a_password_account_does_not_crash(editor):
     window.method_row.set_selected(EditorWindow._METHOD_ORDER.index(METHOD_PASSWORD))
 
 
+_app = None
+
+
+def _application():
+    """One registered application for the module.
+
+    MainWindow is an Adw.ApplicationWindow, so it refuses to exist before
+    GApplication::startup. Registering once here keeps the tests honest about
+    that instead of silencing the critical.
+    """
+    global _app
+    if _app is None:
+        Adw.init()
+        _app = Adw.Application(application_id="io.github.pan.KrbctlTest")
+        _app.register(None)
+        _app.activate()
+    return _app
+
+
+def _page_children(window):
+    """How many widgets are really attached to the page's internal box."""
+    box = window._empty_group.get_parent()
+    count, child = 0, box.get_first_child()
+    while child is not None:
+        count += 1
+        child = child.get_next_sibling()
+    return count
+
+
+@pytest.fixture
+def main_window(tmp_path):
+    """A real MainWindow over a throwaway store holding one session account."""
+    store = config.Store(
+        path=tmp_path / "accounts.json",
+        accounts=[
+            Account(
+                id="me-realm",
+                principal="me@REALM",
+                label="REALM",
+                method=METHOD_SESSION,
+                keytab="",
+                cache="",
+                auto_renew=False,
+            )
+        ],
+    )
+    window = MainWindow(_application(), store)
+    yield window
+    window.destroy()
+
+
+def make_status(seconds_left=7200):
+    """A valid Status whose badge reads ``2h`` — no live cache needed."""
+    return kerberos.Status(state="valid", seconds_left=seconds_left)
+
+
+def test_rebuild_does_not_accumulate_groups(main_window):
+    """The reported bug: three copies of one account on screen.
+
+    ``AdwPreferencesPage.add()`` parents its children to an internal box, so the
+    old "is the parent the page?" test never matched, nothing was detached, and
+    every rebuild appended another copy of every section.
+    """
+    before = _page_children(main_window)
+
+    for _ in range(3):
+        main_window.rebuild()
+        assert _page_children(main_window) == before, "page grew on rebuild"
+
+    assert len(main_window._groups) == len(main_window.store.accounts)
+
+
+def _section_titles(window):
+    """Titles of every PreferencesGroup attached to the page, in order."""
+    box = window._empty_group.get_parent()
+    titles, child = [], box.get_first_child()
+    while child is not None:
+        if isinstance(child, Adw.PreferencesGroup):
+            titles.append(child.get_title())
+        child = child.get_next_sibling()
+    return titles
+
+
+def test_rebuild_keeps_exactly_one_of_each_section(main_window):
+    """One account, one Domain, one Startup — however many times we rebuild."""
+    main_window.rebuild()
+    main_window.rebuild()
+    main_window.rebuild()
+
+    titles = _section_titles(main_window)
+    assert titles.count("Domain") == 1, titles
+    assert titles.count("Startup") == 1, titles
+    assert titles.count("REALM") == 1, titles
+    assert len(main_window._groups) == 1
+
+
+def test_duplicate_accounts_are_deduplicated_on_load(tmp_path):
+    """Two accounts sharing an id are refused at the store, not the widget layer."""
+    duplicated = "\n".join(
+        '{"id": "me-realm", "principal": "me@REALM", "method": "session"}'
+        for _ in range(3)
+    )
+    path = tmp_path / "accounts.json"
+    path.write_text('{"version": 1, "accounts": [' + duplicated + "]}", encoding="utf-8")
+
+    store = config.Store(path=path).load()
+    assert len(store.accounts) == 1
+
+
+def test_duplicate_ids_all_receive_the_real_state(main_window):
+    """Even if duplicates reach the window, neither may stay on "Reading ticket..."."""
+    main_window.store.accounts = [a for a in main_window.store.accounts for _ in (0, 1)]
+    main_window.rebuild()
+
+    main_window._render_state(main_window.store.accounts[0], make_status())
+
+    badges = [group._badge.get_label() for _id, group in main_window._groups]
+    assert badges == ["2h"] * len(main_window._groups)
+    assert len(main_window._groups) == 2
+
+
 def test_saving_a_session_account_keeps_its_method(editor):
     saved = []
     window = editor(Account(id="a", principal="me@REALM", method=METHOD_SESSION))
@@ -123,6 +245,11 @@ def test_switching_from_keytab_to_session_drops_the_keytab_path(editor):
     window._on_save = saved.append
     window._on_save_clicked(window._save_button)
     assert saved and saved[0].keytab == ""
+
+
+def test_window_destroys_itself_like_a_normal_widget(main_window):
+    """Regression: an account action named destroy() shadowed Gtk.Widget.destroy()."""
+    main_window.destroy()
 
 
 def test_a_blank_principal_is_not_saved(editor):

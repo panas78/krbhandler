@@ -125,16 +125,36 @@ class Store:
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 raw = {}
-            self.accounts = [
-                Account.from_dict(item)
-                for item in raw.get("accounts", [])
-                if isinstance(item, dict) and item.get("principal")
-            ]
+            self.accounts = self._dedupe(
+                [
+                    Account.from_dict(item)
+                    for item in raw.get("accounts", [])
+                    if isinstance(item, dict) and item.get("principal")
+                ]
+            )
             self.prefs = Prefs.from_dict(raw.get("prefs", {}))
         if seed and not self.accounts:
             if self.seed():
                 self.save()
         return self
+
+    @staticmethod
+    def _dedupe(accounts: list[Account]) -> list[Account]:
+        """Drop repeated ids, keeping the first.
+
+        The id is what the window keys widgets by, so two accounts sharing one
+        render as a duplicate that cannot be updated or removed individually.
+        Refusing the second entry here means the rest of the code never has to
+        cope with the ambiguity.
+        """
+        seen: set[str] = set()
+        unique: list[Account] = []
+        for account in accounts:
+            if account.id in seen:
+                continue
+            seen.add(account.id)
+            unique.append(account)
+        return unique
 
     def save(self) -> None:
         payload = {
@@ -169,6 +189,7 @@ class Store:
         return candidate
 
     def add(self, account: Account) -> Account:
+        self.accounts = self._dedupe(self.accounts)
         if not account.id:
             account.id = self.unique_id(account.principal)
         existing = self.get(account.id)
@@ -216,7 +237,7 @@ class Store:
             realm = kerberos.split_principal(principal)[1]
             self.accounts.append(
                 Account(
-                    id=slugify(principal),
+                    id=self.unique_id(principal),
                     principal=principal,
                     label=realm or principal,
                     method=METHOD_KEYTAB,
@@ -244,7 +265,7 @@ class Store:
                 continue
             self.accounts.append(
                 Account(
-                    id=slugify(principal),
+                    id=self.unique_id(principal),
                     principal=principal,
                     label=kerberos.split_principal(principal)[1] or principal,
                     method=METHOD_SESSION,
