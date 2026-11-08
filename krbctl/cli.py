@@ -14,7 +14,7 @@ import json
 import sys
 from typing import Optional
 
-from . import autostart, config, kerberos, secrets
+from . import autostart, config, domain, kerberos, secrets
 from .config import Account, METHOD_KEYTAB
 
 EXIT_OK = 0
@@ -173,6 +173,135 @@ def cmd_destroy(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _print_checks(checks: list[dict], *, width: int = 24) -> None:
+    for check in checks:
+        mark = "ok  " if check["ok"] else ("WARN" if check["severity"] == "warning" else "FAIL")
+        detail = check["detail"]
+        print(f"  {mark} {check['name']:<{width}} {detail}")
+
+
+def cmd_domain(args: argparse.Namespace) -> int:
+    """Inspect, join or leave an Active Directory domain."""
+    action = args.action
+
+    try:
+        if action == "status":
+            payload = domain.status(args.user)
+            if args.json:
+                print(json.dumps(payload, indent=2))
+                return EXIT_OK
+
+            joined = ", ".join(payload["realms"]) if payload["realms"] else "not joined"
+            print(f"domain     {joined}")
+            policy = payload["login_policy"].get("login-policy")
+            if policy:
+                print(f"policy     {policy}")
+            print(f"privilege  {payload['privilege'] or 'none available'}")
+            print()
+            _print_checks(payload["checks"])
+            if payload["ready"]:
+                print("\nready.")
+                return EXIT_OK
+            print("\nblocked by: " + ", ".join(payload["blocking"]))
+            return EXIT_WARN
+
+        if action == "discover":
+            info = domain.discover(args.realm)
+            if info is None:
+                print(
+                    f"Realm {args.realm or '(none)'} not found — check DNS and the VPN.",
+                    file=sys.stderr,
+                )
+                return EXIT_WARN
+            if args.json:
+                print(json.dumps(info.to_dict(), indent=2))
+                return EXIT_OK
+            print(f"realm      {info.name}")
+            print(f"domain     {info.domain_name}")
+            print(f"server     {info.server_software}")
+            print(f"client     {info.client_software}")
+            print(f"joined     {'yes' if info.configured else 'no'}")
+            if info.required_packages:
+                missing = domain.missing_packages(tuple(info.required_packages))
+                print(f"packages   {'all present' if not missing else 'missing: ' + ' '.join(missing)}")
+            return EXIT_OK
+
+        if action == "install":
+            missing = domain.missing_packages()
+            if not missing:
+                print("All domain packages are already installed.")
+                return EXIT_OK
+            print(f"Installing: {' '.join(missing)}")
+            domain.install_prerequisites()
+            payload = domain.status()
+            _print_checks(payload["checks"])
+            return EXIT_OK if payload["ready"] else EXIT_WARN
+
+        if action == "join":
+            realm_name = args.realm or domain.suggested_realm()
+            if not realm_name:
+                print("No realm given and none configured in krb5.conf.", file=sys.stderr)
+                return EXIT_ERROR
+            if not args.user and not sys.stdin.isatty():
+                print("--user is required when not run from a terminal", file=sys.stderr)
+                return EXIT_ERROR
+            user = args.user or input(f"Account with join rights for {realm_name}: ").strip()
+            if args.password_stdin:
+                password = sys.stdin.readline().rstrip("\n")
+            else:
+                password = getpass.getpass(f"Password for {user}: ")
+            if not password:
+                print("No password given.", file=sys.stderr)
+                return EXIT_ERROR
+
+            print(f"Joining {realm_name} as {user} — approve the administrator prompt.")
+            payload = domain.join(
+                realm_name,
+                user,
+                password,
+                computer_ou=args.computer_ou,
+                computer_name=args.computer_name,
+                permit_all=not args.no_permit,
+            )
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print("Joined.")
+                _print_checks(payload["checks"])
+            return EXIT_OK
+
+        if action == "leave":
+            realm_name = args.realm
+            if not realm_name:
+                realms = domain.joined_realms()
+                if not realms:
+                    print("Not joined to any domain.", file=sys.stderr)
+                    return EXIT_WARN
+                realm_name = realms[0]
+            print(f"Leaving {realm_name} — approve the administrator prompt.")
+            domain.leave(realm_name)
+            print("Left the domain.")
+            return EXIT_OK
+
+        if action == "check":
+            checks = domain.domain_checks(args.user)
+            if args.json:
+                print(json.dumps([check.to_dict() for check in checks], indent=2))
+                return EXIT_OK
+            _print_checks([check.to_dict() for check in checks])
+            failed = [c for c in checks if not c.ok and c.severity == "required"]
+            return EXIT_OK if not failed else EXIT_WARN
+
+    except domain.DomainError as exc:
+        print(exc.friendly, file=sys.stderr)
+        if exc.output:
+            print(exc.output, file=sys.stderr)
+        return EXIT_ERROR
+
+    print(f"Unknown domain action: {action}", file=sys.stderr)
+    return EXIT_ERROR
+
+
 def cmd_autostart(args: argparse.Namespace) -> int:
     """Turn start-at-login on or off, and report what it currently is."""
     action = args.action
@@ -298,6 +427,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_destroy.add_argument("--account")
     p_destroy.add_argument("--quiet", "-q", action="store_true")
     p_destroy.set_defaults(func=cmd_destroy)
+
+    p_domain = sub.add_parser("domain", help="join or leave an Active Directory domain")
+    p_domain.add_argument(
+        "action",
+        nargs="?",
+        choices=("status", "discover", "install", "join", "leave", "check"),
+        default="status",
+        help="what to inspect or do (default: status)",
+    )
+    p_domain.add_argument("realm", nargs="?", help="realm, e.g. EXAMPLE.COM")
+    p_domain.add_argument("--user", help="account with permission to join computers")
+    p_domain.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read the password from stdin instead of prompting",
+    )
+    p_domain.add_argument("--computer-ou", help="OU DN to create the computer account in")
+    p_domain.add_argument("--computer-name", help="computer account name to use")
+    p_domain.add_argument(
+        "--no-permit",
+        action="store_true",
+        help="do not allow all domain users to log in",
+    )
+    p_domain.add_argument("--json", action="store_true")
+    p_domain.set_defaults(func=cmd_domain)
 
     p_auto = sub.add_parser("autostart", help="start the tray at login")
     p_auto.add_argument(

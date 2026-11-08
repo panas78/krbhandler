@@ -55,6 +55,7 @@ That is this app.
 | **Notifications** | expiring, expired, and renewal failure |
 | **Scriptable** | `krbctl status --json` for bars, scripts and cron |
 | **Zero config** | auto-detects `~/.keytab` on first run and seeds the account |
+| **Domain join** | joins the machine to Active Directory, so a fresh install gets tickets without a shell script |
 
 ## Install
 
@@ -107,6 +108,33 @@ krbctl doctor                # what is missing on this machine
 krbctl autostart             # is the tray set to start on login?
 krbctl autostart on|off      # change it
 ```
+
+### Joining a domain
+
+Tickets only exist once the machine is joined, so the join lives here too — in
+the window, and on the command line for a machine you reach over SSH:
+
+```bash
+krbctl domain                  # readiness and membership
+krbctl domain discover         # ask DNS about the realm
+krbctl domain install          # install realmd / sssd / adcli / oddjob
+krbctl domain join -U admin    # join; prompts for the password
+krbctl domain check --user me  # verify a domain account resolves
+krbctl domain leave            # leave
+```
+
+`krbctl domain status --json` prints the same readiness checks the window shows,
+so a provisioning script can gate on `ready`.
+
+The joining password never reaches `realm`. It is used to obtain a Kerberos
+ticket for the joining account, and realmd then runs with `--no-password
+--unattended` using that ticket. The ticket lives in a throwaway `FILE:` cache
+and is destroyed when the join finishes — so no password appears in a command
+line, and no credential outlives the operation.
+
+Root is requested through `pkexec`, which raises the desktop's own
+authentication prompt instead of a terminal. Unattended `sudo` is used where it
+is configured.
 
 `status` exits `0` when everything is valid, `1` when a ticket is expiring,
 expired or missing, and `2` on a cache error — so a bar module or a cron job can
@@ -169,6 +197,7 @@ krbctl/
 │   ├── config.py     # accounts.json, first-run auto-detect
 │   ├── secrets.py    # libsecret password storage
 │   ├── autostart.py  # start-at-login entry (XDG autostart)
+│   ├── domain.py     # Active Directory join / leave via realmd
 │   ├── cli.py        # krbctl status/renew/destroy/doctor/...
 │   ├── icons.py      # tray state plates, rendered at runtime
 │   ├── tray.py       # StatusNotifierItem + DBusMenu over Gio

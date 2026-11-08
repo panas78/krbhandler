@@ -17,7 +17,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
-from . import autostart, config, icons, kerberos, secrets  # noqa: E402
+from . import autostart, config, domain, icons, kerberos, secrets  # noqa: E402
 from .config import METHOD_KEYTAB, METHOD_PASSWORD, Account  # noqa: E402
 
 CSS = """
@@ -289,6 +289,200 @@ class EditorWindow(Adw.Window):
         self.close()
 
 
+class DomainWindow(Adw.Window):
+    """Join this machine to an Active Directory domain.
+
+    Joining is the one thing this app does that changes the whole machine, so the
+    dialog shows the readiness checks first: the common failures (packages
+    missing, oddjobd off, a one-word hostname) are all visible before the user
+    types a password, instead of surfacing as an obscure realmd error.
+    """
+
+    def __init__(self, parent: Gtk.Window, on_done: Optional[Callable[[], None]] = None):
+        super().__init__()
+        self.set_transient_for(parent)
+        self.set_modal(True)
+        self.set_title("Join a domain")
+        self.set_default_size(560, 720)
+        self._on_done = on_done
+        self._busy = False
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.close())
+        header.pack_start(cancel)
+        self._join_button = Gtk.Button(label="Join")
+        self._join_button.add_css_class("suggested-action")
+        self._join_button.connect("clicked", self._on_join_clicked)
+        header.pack_end(self._join_button)
+        toolbar.add_top_bar(header)
+
+        page = Adw.PreferencesPage()
+        toolbar.set_content(page)
+
+        # The overlay must be the window's content and the toolbar its child —
+        # setting the toolbar as content first gives it a parent, and
+        # set_child() then fails its precondition.
+        self._toasts = Adw.ToastOverlay()
+        self._toasts.set_child(toolbar)
+        self.set_content(self._toasts)
+
+        # ── credentials ──
+        creds = Adw.PreferencesGroup(
+            title="Credentials",
+            description="An account allowed to join computers to the domain",
+        )
+        page.add(creds)
+
+        self.realm_row = Adw.EntryRow(title="Domain / realm")
+        self.realm_row.set_text(domain.suggested_realm())
+        creds.add(self.realm_row)
+
+        self.user_row = Adw.EntryRow(title="Account")
+        creds.add(self.user_row)
+
+        self.password_row = Adw.PasswordEntryRow(title="Password")
+        creds.add(self.password_row)
+        # Enter in the password field should submit, like any login form.
+        self.password_row.connect("entry-activated", lambda *_: self._on_join_clicked())
+
+        self.ou_row = Adw.EntryRow(title="Computer OU (optional)")
+        self.ou_row.set_tooltip_text("DN of the OU to create the computer account in")
+        creds.add(self.ou_row)
+
+        # ── readiness ──
+        self.checks_group = Adw.PreferencesGroup(title="Readiness")
+        page.add(self.checks_group)
+        self._check_rows: list[Gtk.Widget] = []
+
+        self.install_row = Adw.ActionRow(
+            title="Install the domain packages",
+            subtitle="realmd, sssd, adcli and the home-directory helper",
+        )
+        install_button = Gtk.Button(label="Install", valign=Gtk.Align.CENTER)
+        install_button.connect("clicked", self._on_install_clicked)
+        self.install_row.add_suffix(install_button)
+        self.install_row.set_activatable_widget(install_button)
+        self.install_row.set_visible(False)
+        self.checks_group.add(self.install_row)
+
+        self.refresh_checks()
+
+    # ── readiness ─────────────────────────────────────────────
+
+    def refresh_checks(self) -> None:
+        for row in list(self._check_rows):
+            self.checks_group.remove(row)
+        self._check_rows.clear()
+
+        def work():
+            return domain.status()
+
+        def ok(payload: dict) -> None:
+            for check in payload["checks"]:
+                row = Adw.ActionRow(title=check["name"], subtitle=check["detail"] or "—")
+                if not check["ok"]:
+                    row.add_prefix(
+                        Gtk.Image.new_from_icon_name(
+                            "dialog-warning-symbolic"
+                            if check["severity"] == "warning"
+                            else "dialog-error-symbolic"
+                        )
+                    )
+                else:
+                    row.add_prefix(
+                        Gtk.Image.new_from_icon_name("object-select-symbolic")
+                    )
+                self.checks_group.add(row)
+                self._check_rows.append(row)
+
+            missing = domain.missing_packages()
+            self.install_row.set_visible(bool(missing))
+            # The install row must stay above the check rows.
+            self.checks_group.set_description(
+                "Missing packages must be installed before joining" if missing else ""
+            )
+            self._join_button.set_sensitive(not missing and not self._busy)
+
+        def fail(exc: Exception) -> None:
+            self.toast(str(exc))
+
+        run_async(work, ok, fail)
+
+    # ── actions ───────────────────────────────────────────────
+
+    def toast(self, message: str) -> None:
+        self._toasts.add_toast(Adw.Toast.new(message))
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self._join_button.set_sensitive(not busy)
+        self._join_button.set_label("Joining…" if busy else "Join")
+
+    def _on_install_clicked(self, _button: Gtk.Button) -> None:
+        self.toast("Installing packages — approve the administrator prompt")
+        self._set_busy(True)
+
+        def ok(_result) -> None:
+            self._set_busy(False)
+            self.toast("Packages installed")
+            self.refresh_checks()
+
+        def fail(exc: Exception) -> None:
+            self._set_busy(False)
+            self.toast(str(exc))
+
+        run_async(domain.install_prerequisites, ok, fail)
+
+    def _on_join_clicked(self, _button: Gtk.Button) -> None:
+        if self._busy:
+            return
+        realm_name = self.realm_row.get_text().strip()
+        user = self.user_row.get_text().strip()
+        password = self.password_row.get_text()
+
+        # Checked here rather than allowing realmd to fail later: a blank field
+        # costs a polkit prompt and a confusing error.
+        if not realm_name:
+            self.toast("Enter the domain name")
+            return
+        if not user:
+            self.toast("Enter the account to join with")
+            return
+        if not password:
+            self.toast("Enter the password")
+            return
+
+        self._set_busy(True)
+
+        def work():
+            return domain.join(
+                realm_name,
+                user,
+                password,
+                computer_ou=self.ou_row.get_text().strip() or None,
+                permit_all=True,
+            )
+
+        def ok(_payload) -> None:
+            # Drop the password from the widget as soon as it is no longer needed.
+            self.password_row.set_text("")
+            self._set_busy(False)
+            self.toast(f"Joined {realm_name}")
+            if self._on_done is not None:
+                self._on_done()
+            self.close()
+
+        def fail(exc: Exception) -> None:
+            self.password_row.set_text("")
+            self._set_busy(False)
+            message = getattr(exc, "friendly", str(exc))
+            self.toast(message)
+
+        run_async(work, ok, fail)
+
+
 class MainWindow(Adw.ApplicationWindow):
     """Account list, live ticket state, and the manual actions."""
 
@@ -330,6 +524,7 @@ class MainWindow(Adw.ApplicationWindow):
         # bottom no matter how many accounts appear or disappear above it.
         self._syncing_startup = False
         self._startup_group = self._build_startup_group()
+        self._domain_group = self._build_domain_group()
 
         self._install_actions()
         self._apply_css()
@@ -415,16 +610,27 @@ class MainWindow(Adw.ApplicationWindow):
         self.store.load()
         self.rebuild()
 
+    def _detach(self, widget: Gtk.Widget) -> None:
+        """Remove a widget from the page only if it is actually there.
+
+        adw_preferences_page_remove() logs a critical and keeps going when the
+        child is not attached, which on the first rebuild means a burst of
+        warnings for groups that were never added yet.
+        """
+        if widget.get_parent() is self._page:
+            self._page.remove(widget)
+
     def rebuild(self) -> None:
         for group in list(self._groups.values()):
-            self._page.remove(group)
+            self._detach(group)
         self._groups.clear()
         # AdwPreferencesGroup has no clear(); get_first_child() hands back its
         # internal box, not the rows, so the rows are tracked explicitly.
         for row in list(self._empty_rows):
             self._empty_group.remove(row)
         self._empty_rows.clear()
-        self._page.remove(self._startup_group)
+        self._detach(self._startup_group)
+        self._detach(self._domain_group)
 
         if not self.store.accounts:
             self._empty_group.set_title("No accounts")
@@ -439,8 +645,84 @@ class MainWindow(Adw.ApplicationWindow):
             for account in self.store.accounts:
                 self._add_account_group(account)
 
+        self._page.add(self._domain_group)
         self._page.add(self._startup_group)
         self._sync_startup_row()
+        self._sync_domain_group()
+
+    # ── domain ────────────────────────────────────────────────
+
+    def _build_domain_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(title="Domain")
+        self._domain_row = Adw.ActionRow(title="Active Directory")
+        self._domain_action = Gtk.Button(label="Join…", valign=Gtk.Align.CENTER)
+        self._domain_action.connect("clicked", self._on_domain_action)
+        self._domain_row.add_suffix(self._domain_action)
+        self._domain_row.set_activatable_widget(self._domain_action)
+        group.add(self._domain_row)
+        return group
+
+    def _sync_domain_group(self) -> None:
+        """Show membership, or why joining is not possible yet.
+
+        Read from disk every time: the CLI can join or leave while this window is
+        open, and a stale "Join…" button on a joined machine invites a duplicate
+        join.
+        """
+        joined = domain.joined_realms()
+        if joined:
+            self._domain_row.set_title(f"Joined to {', '.join(joined)}")
+            self._domain_row.set_subtitle(
+                domain.login_policy().get("login-policy", "login policy unknown")
+            )
+            self._domain_action.set_label("Leave")
+        else:
+            self._domain_row.set_title("Not joined")
+            missing = domain.missing_packages()
+            self._domain_row.set_subtitle(
+                "Packages missing: " + " ".join(missing)
+                if missing
+                else "Join to get Kerberos tickets from the domain"
+            )
+            self._domain_action.set_label("Join…")
+
+    def _on_domain_action(self, _button: Gtk.Button) -> None:
+        if domain.joined_realms():
+            self._on_leave_domain()
+            return
+        DomainWindow(self, on_done=self.reload).present()
+
+    def _on_leave_domain(self) -> None:
+        realms = domain.joined_realms()
+        if not realms:
+            return
+        realm_name = realms[0]
+
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading=f"Leave {realm_name}?",
+            body="Domain accounts will no longer be able to sign in to this machine.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("leave", "Leave")
+        dialog.set_response_appearance("leave", Adw.ResponseAppearance.DESTRUCTIVE)
+        dialog.set_default_response("cancel")
+
+        def on_response(_dialog, response: str) -> None:
+            if response != "leave":
+                return
+
+            def ok(_r) -> None:
+                self.toast(f"Left {realm_name}")
+                self.reload()
+
+            def fail(exc: Exception) -> None:
+                self.toast(getattr(exc, "friendly", str(exc)))
+
+            run_async(lambda: domain.leave(realm_name), ok, fail)
+
+        dialog.connect("response", on_response)
+        dialog.present()
 
     # ── startup ───────────────────────────────────────────────
 
