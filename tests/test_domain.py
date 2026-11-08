@@ -119,6 +119,95 @@ class TestJoinedRealms:
         assert domain.parse_realm_list("\n\n  orphan: value\n") == []
 
 
+# Captured verbatim from a machine that had joined the same domain twice, under
+# two spellings, with winbind for one and sssd for the other. This is the shape
+# that makes a graphical login fail while a shell login succeeds.
+DOUBLE_JOIN = """\
+diastasys.gr
+  type: kerberos
+  realm-name: DIASTASYS.GR
+  domain-name: diastasys.gr
+  configured: kerberos-member
+  server-software: active-directory
+  client-software: winbind
+  required-package: oddjob
+  required-package: samba-winbind
+  login-formats: DIASTASYS\\%U
+  login-policy: allow-any-login
+Diastasys.gr
+  type: kerberos
+  realm-name: DIASTASYS.GR
+  domain-name: diastasys.gr
+  configured: kerberos-member
+  server-software: active-directory
+  client-software: sssd
+  required-package: sssd-common
+  login-formats: %U@diastasys.gr
+  login-policy: allow-realm-logins
+"""
+
+
+class TestRealmDetails:
+    def test_keeps_both_memberships(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        details = domain.realm_details()
+        assert [r.name for r in details] == ["diastasys.gr", "Diastasys.gr"]
+
+    def test_reports_the_client_software_per_realm(self, monkeypatch):
+        """winbind vs sssd is the detail that explains a broken GUI login."""
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        details = domain.realm_details()
+        assert details[0].client_software == "winbind"
+        assert details[1].client_software == "sssd"
+
+    def test_status_exposes_the_details(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        monkeypatch.setattr(domain, "prerequisites", lambda: [])
+        monkeypatch.setattr(domain, "domain_checks", lambda user=None: [])
+        payload = domain.status()
+        assert len(payload["realms_detail"]) == 2
+        assert payload["realms_detail"][0]["client_software"] == "winbind"
+        assert payload["realms_detail"][1]["login_formats"] == "%U@diastasys.gr"
+
+
+class TestDuplicateMemberships:
+    def test_detects_the_same_realm_joined_twice(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        duplicates = domain.duplicate_memberships(domain.realm_details())
+        assert duplicates == ["diastasys.gr, Diastasys.gr"]
+
+    def test_case_difference_still_counts_as_the_same_realm(self, monkeypatch):
+        """The realm-name is what identifies it, not the spelling used to join."""
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        details = domain.realm_details()
+        assert details[0].raw["realm-name"].lower() == details[1].raw["realm-name"].lower()
+
+    def test_single_membership_is_not_a_duplicate(self, monkeypatch):
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: REALM_LIST_JOINED)
+        assert domain.duplicate_memberships(domain.realm_details()) == []
+
+    def test_two_different_realms_are_not_duplicates(self):
+        text = (
+            "ONE.COM\n  realm-name: ONE.COM\n  client-software: sssd\n"
+            "TWO.COM\n  realm-name: TWO.COM\n  client-software: sssd\n"
+        )
+        assert domain.duplicate_memberships(domain.parse_realm_list(text)) == []
+
+    def test_double_join_is_a_warning_not_a_blocker(self, monkeypatch):
+        """Tickets still work; only the identity lookup is ambiguous."""
+        monkeypatch.setattr(domain, "_realm_list_text", lambda: DOUBLE_JOIN)
+        monkeypatch.setattr(domain, "_service_active", lambda service: True)
+        monkeypatch.setattr(domain, "authselect_profile", lambda: "sssd")
+        monkeypatch.setattr(domain, "login_policy", lambda: {})
+        monkeypatch.setattr(domain, "_run", lambda *a, **k: completed(stdout="box.example.com\n"))
+
+        checks = {check.name: check for check in domain.domain_checks()}
+        assert checks["memberships"].ok is False
+        assert checks["memberships"].severity == "warning"
+        assert "winbind" in checks["memberships"].detail
+        assert "sssd" in checks["memberships"].detail
+
+
 class TestLoginPolicy:
     def test_parses_policy(self, monkeypatch):
         monkeypatch.setattr(domain, "_realm_list_text", lambda: REALM_LIST_JOINED)

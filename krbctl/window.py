@@ -18,7 +18,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 from . import autostart, config, domain, icons, kerberos, secrets  # noqa: E402
-from .config import METHOD_KEYTAB, METHOD_PASSWORD, Account  # noqa: E402
+from .config import METHOD_KEYTAB, METHOD_PASSWORD, METHOD_SESSION, Account  # noqa: E402
 
 CSS = """
 .krb-badge { font-feature-settings: "tnum"; font-weight: 600; }
@@ -125,9 +125,15 @@ class EditorWindow(Adw.Window):
 
         self.method_row = Adw.ComboRow(title="Method")
         self.method_row.set_model(
-            Gtk.StringList.new(["Keytab — unattended, no password", "Password — stored in the keyring"])
+            Gtk.StringList.new(
+                [
+                    "Keytab — unattended, no password",
+                    "Password — stored in the keyring",
+                    "Login session — the ticket SSSD already issued",
+                ]
+            )
         )
-        self.method_row.set_selected(0 if (not account or account.method == METHOD_KEYTAB) else 1)
+        self.method_row.set_selected(self._METHOD_ORDER.index(account.method) if account else 0)
         self.method_row.connect("notify::selected", lambda *_: self._sync_method())
         auth.add(self.method_row)
 
@@ -184,16 +190,32 @@ class EditorWindow(Adw.Window):
 
     # ── behaviour ─────────────────────────────────────────────
 
+    # Row order in the Method combo, and therefore the mapping to the stored
+    # method value. Kept in one place so the two cannot drift.
+    _METHOD_ORDER = (METHOD_KEYTAB, METHOD_PASSWORD, METHOD_SESSION)
+
+    def _method(self) -> str:
+        index = self.method_row.get_selected()
+        if 0 <= index < len(self._METHOD_ORDER):
+            return self._METHOD_ORDER[index]
+        return METHOD_KEYTAB
+
     def _uses_keytab(self) -> bool:
-        return self.method_row.get_selected() == 0
+        return self._method() == METHOD_KEYTAB
+
+    def _is_session(self) -> bool:
+        return self._method() == METHOD_SESSION
 
     def _sync_method(self) -> None:
         keytab = self._uses_keytab()
+        session = self._is_session()
         self.keytab_row.set_visible(keytab)
         self.make_keytab_row.set_visible(keytab)
-        self.password_row.set_visible(not keytab)
-        self.remember_row.set_visible(not keytab)
-        if not self._uses_keytab() and self._existing:
+        # A session account supplies no credentials of its own, so neither the
+        # password field nor the keyring switch applies to it.
+        self.password_row.set_visible(not keytab and not session)
+        self.remember_row.set_visible(not keytab and not session)
+        if not self._uses_keytab() and not session and self._existing:
             # Never re-ask for a password we already hold.
             if secrets.lookup_password(self._existing.principal):
                 self.password_row.set_placeholder_text("Stored in keyring — leave empty to keep")
@@ -265,8 +287,8 @@ class EditorWindow(Adw.Window):
             id=self._existing.id if self._existing else "",
             principal=principal,
             label=self.label_row.get_text().strip() or principal,
-            method=METHOD_KEYTAB if keytab else METHOD_PASSWORD,
-            keytab=self.keytab_row.get_text().strip() or config.DEFAULT_KEYTAB,
+            method=METHOD_KEYTAB if keytab else (METHOD_SESSION if self._is_session() else METHOD_PASSWORD),
+            keytab=(self.keytab_row.get_text().strip() or config.DEFAULT_KEYTAB) if keytab else "",
             cache=self.cache_row.get_text().strip(),
             auto_renew=self.auto_row.get_active(),
             remember_password=self.remember_row.get_active(),
@@ -276,7 +298,7 @@ class EditorWindow(Adw.Window):
         # A typed password is stored (or used once) here, not on save, so the
         # keyring write is attributed to an explicit user action.
         password = self.password_row.get_text()
-        if not keytab and password:
+        if not keytab and not self._is_session() and password:
             if account.remember_password:
                 if not secrets.store_password(principal, password):
                     self._toast("No keyring available — the password will be asked each time")
@@ -669,12 +691,26 @@ class MainWindow(Adw.ApplicationWindow):
         open, and a stale "Join…" button on a joined machine invites a duplicate
         join.
         """
-        joined = domain.joined_realms()
-        if joined:
-            self._domain_row.set_title(f"Joined to {', '.join(joined)}")
-            self._domain_row.set_subtitle(
-                domain.login_policy().get("login-policy", "login policy unknown")
+        details = domain.realm_details()
+        if details:
+            # Name the backend per realm: two memberships using different
+            # clients (winbind and sssd against the same domain) is the
+            # condition that breaks graphical logins, and "Joined to x, X"
+            # alone hides it.
+            labelled = ", ".join(
+                f"{realm.name} ({realm.client_software})" if realm.client_software else realm.name
+                for realm in details
             )
+            self._domain_row.set_title(f"Joined to {labelled}")
+
+            duplicates = domain.duplicate_memberships(details)
+            policy = domain.login_policy().get("login-policy", "login policy unknown")
+            if duplicates:
+                self._domain_row.set_subtitle(
+                    f"{policy} — same domain joined twice; leave once and rejoin"
+                )
+            else:
+                self._domain_row.set_subtitle(policy)
             self._domain_action.set_label("Leave")
         else:
             self._domain_row.set_title("Not joined")
@@ -883,6 +919,11 @@ class MainWindow(Adw.ApplicationWindow):
         def work():
             if account.method == METHOD_KEYTAB:
                 kerberos.kinit_from_keytab(account.principal, account.keytab, account.cache or None)
+            elif account.method == METHOD_SESSION:
+                raise kerberos.KerberosError(
+                    "This ticket comes from your login session",
+                    hint="SSSD renews it automatically — log out and back in if it is expired",
+                )
             else:
                 password = secrets.lookup_password(account.principal)
                 if not password:

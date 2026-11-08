@@ -54,7 +54,7 @@ That is this app.
 | **Keytab creation** | builds one from a password with `ktutil` — no incantations |
 | **Notifications** | expiring, expired, and renewal failure |
 | **Scriptable** | `krbctl status --json` for bars, scripts and cron |
-| **Zero config** | auto-detects `~/.keytab` on first run and seeds the account |
+| **Zero config** | seeds the account on first run from `~/.keytab`, or from a ticket your login session already holds |
 | **Domain join** | joins the machine to Active Directory, so a fresh install gets tickets without a shell script |
 
 ## Install
@@ -125,6 +125,13 @@ krbctl domain leave            # leave
 
 `krbctl domain status --json` prints the same readiness checks the window shows,
 so a provisioning script can gate on `ready`.
+
+The Domain row names the client software per realm — `Joined to example.com
+(sssd)`. If the same domain was joined twice under different spellings, it says
+so: two memberships mean two identity clients can answer a lookup, and which one
+wins depends on the PAM stack. That is the condition behind a graphical login
+that authenticates and then drops straight back to the greeter while a shell
+login works fine.
 
 The joining password never reaches `realm`. It is used to obtain a Kerberos
 ticket for the joining account, and realmd then runs with `--no-password
@@ -245,6 +252,27 @@ in the keyring, keyed by principal.
 `cache: ""` means "whatever the session default is" — which respects
 `KRB5CCNAME` and `/etc/krb5.conf`'s `default_ccache_name`, so a KCM or KEYRING
 setup needs nothing special.
+
+### Seeding
+
+First run fills this file in, in two steps, and you normally never edit it:
+
+| Found | Account created |
+|---|---|
+| `~/.keytab` | `method: "keytab"`, `auto_renew: true` |
+| A live cache but no keytab | `method: "session"`, `auto_renew: false` |
+
+The keytab wins because it is the only one of the two that supports unattended
+renewal. A `session` account is a ticket your login already obtained — SSSD puts
+AD tickets in `KCM:` or `KEYRING:` — so there is no secret for the app to hold
+and nothing for it to renew with. It observes the ticket and says so if you ask
+it to renew.
+
+The seeded session account deliberately keeps `cache: ""` rather than the real
+cache name. A KCM name looks like `KCM:1014801116:76132`, and that trailing
+number is the login session id: storing it would work until you logged out and
+then silently read the wrong place. Leaving it empty follows the session, which
+is what plain `klist` does.
 
 ## Gotchas worth knowing
 

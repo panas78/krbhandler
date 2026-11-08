@@ -15,7 +15,7 @@ import sys
 from typing import Optional
 
 from . import autostart, config, domain, kerberos, secrets
-from .config import Account, METHOD_KEYTAB
+from .config import Account, METHOD_KEYTAB, METHOD_SESSION
 
 EXIT_OK = 0
 EXIT_WARN = 1  # expiring / expired / no ticket
@@ -133,6 +133,14 @@ def cmd_renew(args: argparse.Namespace) -> int:
     try:
         if account.method == METHOD_KEYTAB:
             kerberos.kinit_from_keytab(account.principal, account.keytab, account.cache or None)
+        elif account.method == METHOD_SESSION:
+            # Be explicit rather than falling through to the password branch,
+            # which would report "no stored password" for an account that never
+            # had one and is not supposed to.
+            raise kerberos.KerberosError(
+                "This ticket comes from your login session",
+                hint="SSSD renews it automatically — log out and back in if it has expired",
+            )
         else:
             password = None
             if not args.password_stdin:
@@ -386,6 +394,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             perms = oct(_os.stat(path).st_mode & 0o777)
             note = "" if perms == "0o600" else f"  (permissions {perms}, want 0o600)"
             print(f"  {account.id}: keytab {path}{note}")
+        elif account.method == METHOD_SESSION:
+            if caches:
+                print(f"  {account.id}: session ticket in {caches[0][1]}")
+            else:
+                print(f"  {account.id}: no session ticket visible (log in again)")
+                problems += 1
         else:
             stored = "stored" if secrets.lookup_password(account.principal) else "not stored"
             print(f"  {account.id}: password {stored}")

@@ -4,9 +4,14 @@ One human-readable JSON file at ``~/.config/krbctl/accounts.json`` (mode 0600).
 No passwords live here — password-method accounts keep their secret in the
 Secret Service (GNOME Keyring / KWallet) under the same principal.
 
-First run auto-seeds from ``~/.keytab`` so a working machine needs zero
-configuration: if a keytab exists, its principal becomes an account with
-auto-renew on.
+First run auto-seeds so a working machine needs zero configuration. Two
+sources are tried, in this order:
+
+1. ``~/.keytab`` — a keytab means the app can renew unattended, so it wins.
+2. An existing Kerberos cache — a domain-joined machine that was logged into
+   through SSSD already has a ticket in ``KCM:`` or ``KEYRING:`` and no keytab
+   at all. Before this existed the window showed "No accounts" on such a
+   machine while ``klist`` plainly listed a valid TGT.
 """
 
 from __future__ import annotations
@@ -28,7 +33,11 @@ ACCOUNTS_FILE = CONFIG_DIR / "accounts.json"
 
 METHOD_KEYTAB = "keytab"
 METHOD_PASSWORD = "password"
-METHODS = (METHOD_KEYTAB, METHOD_PASSWORD)
+# A ticket that the login session provides (SSSD puts AD tickets in KCM or
+# KEYRING). The app observes it but cannot create it, because that would need a
+# credential it does not have.
+METHOD_SESSION = "session"
+METHODS = (METHOD_KEYTAB, METHOD_PASSWORD, METHOD_SESSION)
 
 DEFAULT_POLL_SECONDS = 30
 DEFAULT_WARN_MINUTES = 15
@@ -172,6 +181,14 @@ class Store:
     # ── first-run detection ───────────────────────────────────
 
     def seed(self) -> bool:
+        """Turn whatever already exists on this machine into an account.
+
+        Keytab first, because a keytab can be used for unattended renewal;
+        a session ticket only be observed.
+        """
+        return self._seed_from_keytab() or self._seed_from_cache()
+
+    def _seed_from_keytab(self) -> bool:
         """Detect an existing keytab and turn it into an account.
 
         Zero-config on a machine that is already set up: no wizard, no typing a
@@ -194,6 +211,37 @@ class Store:
                     method=METHOD_KEYTAB,
                     keytab=candidate,
                     auto_renew=True,
+                )
+            )
+            return True
+        return False
+
+    def _seed_from_cache(self) -> bool:
+        """Detect a live ticket in the session's Kerberos cache.
+
+        A domain machine logged into through SSSD has a TGT but no keytab, so
+        the keytab seeder finds nothing and the window came up empty.
+
+        ``cache`` is deliberately left empty: the real cache name is something
+        like ``KCM:1014801116:76132``, and that trailing number is the login
+        session id, so storing it would break at the next login. An empty cache
+        means "whatever the session provides", which is exactly what plain
+        ``klist`` reads.
+        """
+        for principal, _cache_name in kerberos.list_caches():
+            if not principal:
+                continue
+            self.accounts.append(
+                Account(
+                    id=slugify(principal),
+                    principal=principal,
+                    label=kerberos.split_principal(principal)[1] or principal,
+                    method=METHOD_SESSION,
+                    keytab="",
+                    cache="",
+                    # Nothing to renew with: no keytab, and guessing a password
+                    # is not this app's business. SSSD renews its own TGT.
+                    auto_renew=False,
                 )
             )
             return True

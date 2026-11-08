@@ -319,9 +319,21 @@ def _realm_list_text() -> str:
     return _run([REALM, "list"], timeout=30).stdout
 
 
+def realm_details() -> list[RealmInfo]:
+    """Every joined realm with its membership details.
+
+    ``realm list`` keys realms by the name they were joined under, which is not
+    necessarily the realm name — joining the same domain twice with different
+    casing produces two entries. Keeping the details lets the caller show which
+    backend each one uses, which is the difference between a cosmetic duplicate
+    and two identity providers fighting over the same domain.
+    """
+    return parse_realm_list(_realm_list_text())
+
+
 def joined_realms() -> list[str]:
     """Names of the realms this machine is currently joined to."""
-    return [realm.name for realm in parse_realm_list(_realm_list_text())]
+    return [realm.name for realm in realm_details()]
 
 
 def login_policy() -> dict[str, str]:
@@ -413,6 +425,20 @@ def prerequisites() -> list[Check]:
     return checks
 
 
+def duplicate_memberships(realms: list[RealmInfo]) -> list[str]:
+    """Realm names joined more than once (compared case-insensitively).
+
+    Two memberships of the same domain mean two clients can answer an identity
+    lookup, and which one wins depends on the PAM stack — so authentication can
+    succeed in one component while another cannot find the user.
+    """
+    seen: dict[str, list[str]] = {}
+    for realm in realms:
+        key = (realm.raw.get("realm-name") or realm.name).lower()
+        seen.setdefault(key, []).append(realm.name)
+    return [name for names in seen.values() if len(names) > 1 for name in [", ".join(names)]]
+
+
 def domain_checks(user: Optional[str] = None) -> list[Check]:
     """The post-join verification, mirroring check-domain.sh."""
     checks: list[Check] = []
@@ -423,6 +449,23 @@ def domain_checks(user: Optional[str] = None) -> list[Check]:
 
     if not realms:
         return checks
+
+    details = realm_details()
+    clients = sorted({realm.client_software or "unknown" for realm in details})
+    duplicates = duplicate_memberships(details)
+    if len(details) > 1:
+        # Worth a warning, not a blocker: Kerberos tickets still work, but the
+        # machine has two identities stacks that can disagree about who a user
+        # is.
+        checks.append(
+            Check(
+                "memberships",
+                not duplicates,
+                f"{len(details)} realms ({', '.join(clients)})"
+                + (f" — same domain joined twice: {'; '.join(duplicates)}" if duplicates else ""),
+                severity="warning",
+            )
+        )
 
     checks.append(Check("sssd", _service_active("sssd"), "identity provider"))
     checks.append(Check("oddjobd", _service_active("oddjobd"), "home directory creation"))
@@ -485,6 +528,17 @@ def status(user: Optional[str] = None) -> dict:
     return {
         "joined": bool(realms),
         "realms": realms,
+        "realms_detail": [
+            {
+                "name": realm.name,
+                "realm_name": realm.raw.get("realm-name", ""),
+                "domain_name": realm.domain_name,
+                "client_software": realm.client_software,
+                "login_formats": realm.raw.get("login-formats", ""),
+                "login_policy": realm.raw.get("login-policy", ""),
+            }
+            for realm in realm_details()
+        ],
         "login_policy": login_policy(),
         "checks": [check.to_dict() for check in all_checks],
         "blocking": [check.name for check in blocking],
@@ -725,10 +779,13 @@ __all__ = [
     "leave",
     "login_policy",
     "missing_packages",
+    "duplicate_memberships",
     "parse_discover",
+    "parse_realm_list",
     "permit_all",
     "prerequisites",
     "privilege_tool",
+    "realm_details",
     "status",
     "suggested_realm",
 ]
