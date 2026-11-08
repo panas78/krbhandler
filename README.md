@@ -27,6 +27,10 @@ for every state, so it reads as one indicator that changes hue rather than as
 five unrelated icons. It is drawn at runtime by `krbctl/icons.py` — a few dozen
 lines of cairo, no artwork and no files to load.
 
+Clicking it gives two entries: **Open Kerberos Tickets** and **Quit**. Everything
+about a ticket — its state, renewing, destroying, removing — is in the window, so
+mirroring it in the menu only produced a smaller copy that lagged behind.
+
 ## Why it exists
 
 `kinit` + a systemd timer gets you a ticket. What you do not get is:
@@ -45,7 +49,7 @@ That is this app.
 | | |
 |---|---|
 | **Live state** | valid / expiring / expired / no ticket / cache error, polled every 30 s |
-| **Tray icon** | StatusNotifierItem with a state-coloured key, tooltip, and a working DBusMenu |
+| **Tray icon** | StatusNotifierItem with a state-coloured key, a tooltip, and a two-entry menu: *Open Kerberos Tickets* and *Quit* |
 | **Native window** | GTK4 + libadwaita; accounts, ticket detail, renew, destroy |
 | **Auto-renew** | renews from the keytab when the ticket is inside the warning window |
 | **Backoff** | a failing renewal backs off 5 minutes instead of hammering a dead KDC |

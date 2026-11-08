@@ -23,16 +23,13 @@ gi.require_version("Gio", "2.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import config, kerberos  # noqa: E402
-from .config import METHOD_KEYTAB, Account  # noqa: E402
+from .config import METHOD_KEYTAB  # noqa: E402
 from .tray import MenuItem, Tray  # noqa: E402
 from .window import MainWindow, run_async  # noqa: E402
 
 ICON_NAME = "krbctl"
 
 # Menu action ids, kept short — they round-trip through D-Bus labels.
-ACT_RENEW = "renew"
-ACT_DESTROY = "destroy"
-ACT_DETAILS = "details"
 ACT_WINDOW = "window"
 ACT_QUIT = "quit"
 
@@ -57,9 +54,6 @@ class KrbApplication(Adw.Application):
         self._poll_source: Optional[int] = None
         self._busy = False
         self._actions = {
-            ACT_RENEW: self._menu_renew,
-            ACT_DESTROY: self._menu_destroy,
-            ACT_DETAILS: self._menu_details,
             ACT_WINDOW: self.show_window,
             ACT_QUIT: self.quit,
         }
@@ -103,7 +97,6 @@ class KrbApplication(Adw.Application):
             app_id=self.get_application_id() or "krbctl",
             title="Kerberos Tickets",
             on_activate=self.show_window,
-            on_secondary=self._menu_details,
         )
         self.tray.start()
         self._refresh_menu()
@@ -202,83 +195,22 @@ class KrbApplication(Adw.Application):
         if self.tray is None:
             return
 
-        items: list[MenuItem] = []
-        next_id = [1]
+        # Two entries, deliberately. Everything about a ticket -- its state,
+        # renewing, destroying, removing -- is in the window, which is one click
+        # away. Mirroring it here made the menu a second, smaller copy of the
+        # Tickets tab that always drifted behind it.
+        items: list[MenuItem] = [
+            MenuItem(id=1, label="Open Kerberos Tickets", action=ACT_WINDOW),
+            MenuItem(id=2, label="Quit", action=ACT_QUIT),
+        ]
 
-        def new_id() -> int:
-            value = next_id[0]
-            next_id[0] += 1
-            return value
-
-        if not self.store.accounts:
-            items.append(MenuItem(id=new_id(), label="No account configured", enabled=False))
-        for account in self.store.accounts:
-            status = self._statuses.get(account.id)
-            badge = status.label if status else "…"
-            state = status.state if status else "none"
-
-            submenu_items = []
-            if state in ("valid", "expiring", "expired", "none"):
-                submenu_items.append(
-                    MenuItem(id=new_id(), label="Renew now", action=ACT_RENEW)
-                )
-            if state in ("valid", "expiring"):
-                submenu_items.append(
-                    MenuItem(id=new_id(), label="Destroy ticket", action=ACT_DESTROY)
-                )
-            submenu_items.append(MenuItem(id=new_id(), label="Details…", action=ACT_DETAILS))
-
-            items.append(
-                MenuItem(
-                    id=new_id(),
-                    label=f"{badge}  {account.label}",
-                    kind="submenu",
-                    children=submenu_items,
-                )
-            )
-
-        items.append(MenuItem(id=new_id(), kind="separator"))
-        items.append(MenuItem(id=new_id(), label="Open Kerberos Tickets", action=ACT_WINDOW))
-        items.append(MenuItem(id=new_id(), label="Quit", action=ACT_QUIT))
-
-        root_children = items
-        root = MenuItem(id=0, kind="submenu", children=root_children)
+        root = MenuItem(id=0, kind="submenu", children=items)
         self.tray.set_menu([root], self._actions)
 
     def _open_window(self) -> None:
         self.show_window()
 
     # ── menu actions ──────────────────────────────────────────
-
-    def _first_account(self) -> Optional[Account]:
-        return self.store.accounts[0] if self.store.accounts else None
-
-    def _menu_renew(self) -> None:
-        account = self._first_account()
-        if account is None:
-            return
-        self._open_window()
-        if self.window is not None:
-            self.window.renew(account)
-
-    def _menu_destroy(self) -> None:
-        account = self._first_account()
-        if account is None:
-            return
-        if self.window is not None:
-            self.window.destroy_ticket(account)
-        self._schedule_poll(immediate=True)
-
-    def _menu_details(self) -> None:
-        account = self._first_account()
-        if account is None:
-            self._open_window()
-            return
-        self._open_window()
-        if self.window is not None:
-            from .window import _ticket_lines
-
-            self.window._show_text(f"klist — {account.principal}", _ticket_lines(account))
 
     # ── auto renew + notifications ────────────────────────────
 
