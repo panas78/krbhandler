@@ -15,17 +15,21 @@ It appears in the **launcher** icon, which is a static PNG set under
 `data/icons/hicolor/` — nine sizes, committed, copied into place by `install.sh`.
 No image tooling is needed to install or run this.
 
-In the **tray**, the ticket state is a rounded plate in the state's colour:
+In the **tray**, you get the app's own icon, with the state as a small corner dot
+that appears only when there is something to act on:
 
-| green | amber | orange | red | faded |
+| (no dot) | amber | orange | red | grey |
 |---|---|---|---|---|
 | valid | expiring soon | cache unreadable | expired | no ticket |
 
-A solid plate rather than a glyph, because at 22 px on a bar colour is the only
-thing that survives and the state is the whole message. The shape is identical
-for every state, so it reads as one indicator that changes hue rather than as
-five unrelated icons. It is drawn at runtime by `krbctl/icons.py` — a few dozen
-lines of cairo, no artwork and no files to load.
+A healthy ticket is the quiet case: just the icon, no annotation competing with
+every other icon in the bar. The dot is ringed in near-black so the colour still
+separates from the artwork behind it. It is drawn at runtime by
+`krbctl/icons.py`, which loads the installed `krbctl.png` from the icon theme and
+falls back to the older solid plate if the icon set is missing.
+
+In the **window**, each account row keeps a solid plate instead, because a colour
+chip beside a name reads faster than a picture would.
 
 Clicking it gives two entries: **Open Kerberos Handler** and **Quit**. Everything
 about a ticket — its state, renewing, destroying, removing — is in the window, so
@@ -49,7 +53,7 @@ That is this app.
 | | |
 |---|---|
 | **Live state** | valid / expiring / expired / no ticket / cache error, polled every 30 s |
-| **Tray icon** | StatusNotifierItem with a state-coloured key, a tooltip, and a two-entry menu: *Open Kerberos Handler* and *Quit* |
+| **Tray icon** | StatusNotifierItem showing the app icon with a state dot, a tooltip, and a two-entry menu: *Open Kerberos Handler* and *Quit* |
 | **Native window** | GTK4 + libadwaita; accounts, ticket detail, renew, destroy |
 | **Auto-renew** | renews from the keytab when the ticket is inside the warning window |
 | **Backoff** | a failing renewal backs off 5 minutes instead of hammering a dead KDC |
@@ -321,12 +325,17 @@ is what plain `klist` does.
   keytab requires the VPN up and the correct password — it is not offline.
 * **Auto-renew never spends a stored password.** Only keytab accounts renew
   unattended; password accounts renew when you press the button.
-* **The tray icon must advertise no `IconName`.** The icon is the state plate,
-  drawn at runtime and shipped in `IconPixmap`. A StatusNotifierItem host that
-  finds `IconName` set draws that theme icon *instead* of the pixmap, so any
-  name here silently replaces the state colour — on Noctalia the name
-  `dialog-password-symbolic` showed up as a keyhole and the plate never
+* **The tray icon must advertise no `IconName`.** The icon is drawn at runtime
+  from the installed PNG and shipped in `IconPixmap`. A StatusNotifierItem host
+  that finds `IconName` set draws that theme icon *instead* of the pixmap, so
+  any name here silently replaces the drawing — on Noctalia the leftover name
+  `dialog-password-symbolic` showed up as a keyhole and the real icon never
   appeared. `IconName` is deliberately the empty string.
+* **The tray icon is resolved through the icon theme, not the payload.**
+  `install.sh` keeps no PNGs in `share/krbctl`, so `icons.app_icon_path()`
+  searches `XDG_DATA_HOME`/`XDG_DATA_DIRS` for `hicolor/*/apps/krbctl.png`,
+  nearest committed size first. If it finds nothing it falls back to the drawn
+  plate rather than rendering a blank square.
 
 ## Requirements
 

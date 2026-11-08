@@ -1,21 +1,45 @@
 """The tray icon and the status badges in the window.
 
-The ticket state is carried by colour: a rounded plate in the state's colour.
-Nothing is loaded from disk and nothing is drawn from artwork, so this module is
-size-independent and cannot break because a file went missing.
+Two different jobs, two different renderings:
 
-The launcher icon is separate and static — ``data/icons/hicolor/*/apps/krbctl.png``
-is installed by ``install.sh`` and looked up through the icon theme by name.
+* **The tray shows the app icon.** On a bar, a recognisable icon is what tells
+  you *which* app this is; a coloured square does not. The committed launcher
+  PNG is loaded from the icon theme and drawn as-is.
+* **The window shows a state plate.** In a list of accounts each row has a name
+  next to it, so a solid colour chip reads faster than a picture would.
+
+The state does not disappear from the tray, it stops shouting: the plate colour
+becomes a small corner dot that appears only when the state is worth acting on
+(expiring, expired, unreadable, or no ticket at all). A healthy ticket is the
+quiet case — just the icon.
+
+Every rendered surface is size-independent and falls back to the drawn plate if
+the PNG cannot be found, so a missing icon degrades to the old look rather than
+to a blank square.
 """
 
 from __future__ import annotations
 
 import math
+import os
+from pathlib import Path
 
 import cairo
 
 # The coloured plate's inset from its own edge, as a fraction of the icon size.
 PLATE_INSET = 0.055
+
+# The tray is drawn at whatever size the bar asks for; 22 px is what SNI hosts
+# use on this desktop, so it is the one that must look right.
+TRAY_SIZE = 22
+
+# Icon theme name, matching the files install.sh drops into hicolor.
+ICON_NAME = "krbctl"
+
+# Preferred source sizes, nearest-to-target first. The committed set ships all
+# of these, so a bar asking for 22 gets the hand-tuned 22 px PNG rather than a
+# downscale of the 512 px one.
+ICON_SIZES = (22, 24, 16, 32, 48, 64, 128, 256, 512)
 
 # Nord palette, matching the Noctalia bar and the desktop theme.
 STATE_COLORS = {
@@ -31,6 +55,22 @@ STATE_COLORS = {
 
 # Alpha for "no ticket" — the plate stays visible but reads as inactive.
 STATE_ALPHA = {"none": 0.60}
+
+# States that earn a dot on the tray icon. "valid" is deliberately absent: a
+# ticket that is fine needs no announcement, so the tray stays a plain app icon.
+BADGED_STATES = ("expiring", "expired", "error", "none")
+
+# The dot's outer radius and inner colour radius, as fractions of icon size. The
+# gap between them is a dark ring so the colour still separates from the busy
+# artwork behind it, which a bare dot would not. Tuned by eye on the real 22 px
+# icon: 0.26 swallowed the artwork and 0.15 vanished on a dark bar.
+DOT_OUTER = 0.18
+DOT_INNER = 0.125
+
+# The ring that separates the dot from the artwork behind it.
+RING_COLOR = (0.10, 0.12, 0.16)
+
+_icon_cache: dict[tuple[str, int], cairo.ImageSurface | None] = {}
 
 
 def _rounded_rect(
@@ -80,6 +120,124 @@ def surface_for_state(state: str, size: int = 22) -> cairo.ImageSurface:
     return faded
 
 
+def _icon_base_dirs() -> list[Path]:
+    """Every ``…/share/icons`` directory the icon theme spec searches."""
+    bases: list[Path] = []
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    bases.append(Path(data_home) / "icons")
+    data_dirs = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    for entry in data_dirs.split(":"):
+        if entry:
+            bases.append(Path(entry) / "icons")
+    return bases
+
+
+def _sizes_from(size: int) -> list[int]:
+    """``ICON_SIZES`` ordered by distance from ``size``, nearest first."""
+    return sorted(ICON_SIZES, key=lambda candidate: (abs(candidate - size), -candidate))
+
+
+def app_icon_path(size: int = TRAY_SIZE) -> Path | None:
+    """The installed ``krbctl.png`` closest to ``size``, or None if absent.
+
+    Resolved through the icon theme search path rather than a path relative to
+    the package: ``install.sh`` deliberately keeps no PNGs in the payload, so
+    the theme directory is the only place the icon is guaranteed to be.
+    """
+    override = os.environ.get("KRBCTL_ICON_PATH")
+    if override:
+        path = Path(override)
+        return path if path.is_file() else None
+
+    for base in _icon_base_dirs():
+        for candidate in _sizes_from(size):
+            path = base / "hicolor" / f"{candidate}x{candidate}" / "apps" / f"{ICON_NAME}.png"
+            if path.is_file():
+                return path
+    return None
+
+
+def _app_icon_surface(size: int) -> cairo.ImageSurface | None:
+    """The app icon at exactly ``size`` px, or None if it cannot be loaded.
+
+    Cached per (file, size): the tray redraws on every poll, and decoding a PNG
+    twice a minute to produce the same pixels is pointless.
+    """
+    path = app_icon_path(size)
+    if path is None:
+        return None
+
+    key = (str(path), size)
+    if key in _icon_cache:
+        return _icon_cache[key]
+
+    try:
+        source = cairo.ImageSurface.create_from_png(str(path))
+    except (cairo.Error, OSError):
+        _icon_cache[key] = None
+        return None
+
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surface)
+    cr.set_antialias(cairo.ANTIALIAS_BEST)
+    # Scale the source to fill the target. The committed sizes match what a bar
+    # asks for, so in practice this is 1:1 and no resampling happens.
+    cr.scale(size / source.get_width(), size / source.get_height())
+    cr.set_source_surface(source, 0, 0)
+    cr.get_source().set_filter(cairo.FILTER_GOOD)
+    cr.paint()
+    surface.flush()
+
+    _icon_cache[key] = surface
+    return surface
+
+
+def clear_icon_cache() -> None:
+    """Drop cached decodes — for tests, and after an icon set is reinstalled."""
+    _icon_cache.clear()
+
+
+def _draw_state_dot(cr: cairo.Context, state: str, size: int) -> None:
+    """A ringed dot in the state colour, bottom-right of the icon."""
+    outer = size * DOT_OUTER
+    inner = size * DOT_INNER
+    centre = size - outer - size * 0.05
+
+    cr.arc(centre, centre, outer, 0, 2 * math.pi)
+    cr.set_source_rgb(*RING_COLOR)
+    cr.fill()
+
+    cr.arc(centre, centre, inner, 0, 2 * math.pi)
+    cr.set_source_rgb(*STATE_COLORS[state])
+    cr.fill()
+
+
+def tray_surface_for_state(state: str, size: int = TRAY_SIZE) -> cairo.ImageSurface:
+    """The app icon, with a state dot when the state is worth acting on.
+
+    Falls back to the plain state plate when no icon PNG can be found, so the
+    tray is never a blank square and an uninstalled icon set is visible rather
+    than silent.
+    """
+    state = state if state in STATE_COLORS else "none"
+
+    icon = _app_icon_surface(size)
+    if icon is None:
+        return surface_for_state(state, size)
+
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surface)
+    cr.set_antialias(cairo.ANTIALIAS_BEST)
+    cr.set_source_surface(icon, 0, 0)
+    cr.paint()
+
+    if state in BADGED_STATES:
+        _draw_state_dot(cr, state, size)
+
+    surface.flush()
+    return surface
+
+
 def _argb32_big_endian(surface: cairo.ImageSurface) -> bytes:
     """Cairo gives native-endian premultiplied ARGB32; SNI wants big-endian.
 
@@ -106,13 +264,13 @@ def _argb32_big_endian(surface: cairo.ImageSurface) -> bytes:
     return bytes(out)
 
 
-def sni_pixmap(state: str, size: int = 22) -> list[tuple[int, int, bytes]]:
+def sni_pixmap(state: str, size: int = TRAY_SIZE) -> list[tuple[int, int, bytes]]:
     """One-element list matching SNI's ``a(iiay)`` IconPixmap signature."""
-    surface = surface_for_state(state, size)
+    surface = tray_surface_for_state(state, size)
     return [(size, size, _argb32_big_endian(surface))]
 
 
-def gdk_pixbuf_for_state(state: str, size: int = 22):
+def gdk_pixbuf_for_state(state: str, size: int = TRAY_SIZE):
     """A GdkPixbuf for GTK widgets, rendered at the same size as the tray."""
     import gi
 

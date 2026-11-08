@@ -1,10 +1,19 @@
 """Icon tests — the tray indicator and the shipped icon set.
 
+Two renderings are tested separately, because they answer different questions:
+
+* **The tray** must show the app icon, so it is identifiable in a bar, and must
+  add the state colour only when the state needs acting on.
+* **The window** keeps the solid state plate, which reads faster than a picture
+  when it sits next to an account name.
+
 The failures worth guarding against are the silent ones:
 
 * a tray icon that renders as nothing, so the bar shows a gap;
+* the app icon silently not loading, so the tray falls back without anyone
+  noticing the set went missing;
 * a wrong byte order, so a valid green ticket looks red;
-* the state colour silently not being applied, so the icon conveys nothing;
+* the state being lost entirely, so a broken ticket looks like a healthy one;
 * the static launcher icon set going missing from the payload.
 
 Cairo's ARGB32 is native-endian: on x86 the bytes per pixel are B, G, R, A, so
@@ -22,6 +31,19 @@ from krbctl import icons
 
 HICOLOR = Path(icons.__file__).resolve().parent.parent / "data" / "icons" / "hicolor"
 ICON_SIZES = (16, 22, 24, 32, 48, 64, 128, 256, 512)
+
+
+@pytest.fixture(autouse=True)
+def isolated_icon(monkeypatch):
+    """Pin the tray icon to the repo's own 22 px PNG.
+
+    Without this the tests would pass or fail depending on whether krbctl
+    happens to be installed on the machine running them.
+    """
+    monkeypatch.setenv("KRBCTL_ICON_PATH", str(HICOLOR / "22x22" / "apps" / "krbctl.png"))
+    icons.clear_icon_cache()
+    yield
+    icons.clear_icon_cache()
 
 
 def alpha_map(surface: cairo.ImageSurface) -> list[int]:
@@ -111,14 +133,8 @@ class TestTrayPixmap:
 
     def test_buffer_is_argb_big_endian(self):
         """SNI wants [A, R, G, B]; cairo gives [B, G, R, A]."""
-        width, height, data = icons.sni_pixmap("valid", 22)[0]
+        _, _, data = icons.sni_pixmap("valid", 22)[0]
         assert max(data[0::4]) == 255, "no opaque alpha byte"
-
-        first_opaque = next(
-            (data[i], data[i + 1], data[i + 2]) for i in range(0, len(data), 4) if data[i] == 255
-        )
-        _, red, green = first_opaque
-        assert green > red, "the green state is not green"
 
     def test_rows_are_tightly_packed(self):
         """Odd widths would leave cairo's stride padding in the buffer.
@@ -129,7 +145,7 @@ class TestTrayPixmap:
         size = 22
         _, _, data = icons.sni_pixmap("valid", size)[0]
         assert len(data) == size * size * 4
-        surface = icons.surface_for_state("valid", size)
+        surface = icons.tray_surface_for_state("valid", size)
         assert surface.get_stride() >= size * 4
 
     def test_every_state_produces_a_full_buffer(self):
@@ -137,6 +153,126 @@ class TestTrayPixmap:
             width, height, data = icons.sni_pixmap(state, 22)[0]
             assert len(data) == width * height * 4
             assert any(data[0::4]), f"{state}: fully transparent pixmap"
+
+
+class TestTrayShowsTheAppIcon:
+    """The tray is the app's face in the bar, so it must be the app's icon."""
+
+    def test_the_icon_file_is_the_one_that_was_installed(self):
+        assert icons.app_icon_path(22) == HICOLOR / "22x22" / "apps" / "krbctl.png"
+
+    def test_the_nearest_committed_size_is_preferred(self, monkeypatch, tmp_path):
+        """A bar asking for 24 px should get the 24 px PNG, not a resize."""
+        monkeypatch.delenv("KRBCTL_ICON_PATH")
+        data_home = tmp_path / "share"
+        for size in (16, 22, 24, 48):
+            target = data_home / "icons" / "hicolor" / f"{size}x{size}" / "apps"
+            target.mkdir(parents=True)
+            (target / "krbctl.png").write_bytes(
+                (HICOLOR / f"{size}x{size}" / "apps" / "krbctl.png").read_bytes()
+            )
+        monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+        icons.clear_icon_cache()
+
+        assert "24x24" in str(icons.app_icon_path(24))
+        assert "16x16" in str(icons.app_icon_path(16))
+
+    def test_a_healthy_tray_icon_is_the_untouched_artwork(self):
+        """No dot on "valid": a working ticket announces nothing."""
+        rendered = icons.tray_surface_for_state("valid", 22)
+        source = cairo.ImageSurface.create_from_png(str(icons.app_icon_path(22)))
+        assert bytes(rendered.get_data()) == bytes(source.get_data())
+
+    def test_the_artwork_survives_in_the_top_left(self):
+        """A dot in the corner must not repaint the whole icon."""
+        rendered = icons.tray_surface_for_state("expired", 22)
+        source = cairo.ImageSurface.create_from_png(str(icons.app_icon_path(22)))
+        assert pixel_at(rendered, 3, 3) == pixel_at(source, 3, 3)
+
+
+class TestStateDot:
+    """The state is still on the tray, just quiet when nothing is wrong."""
+
+    @pytest.mark.parametrize("state", icons.BADGED_STATES)
+    def test_troubled_states_get_a_dot(self, state):
+        plain = icons.tray_surface_for_state("valid", 22)
+        troubled = icons.tray_surface_for_state(state, 22)
+        assert bytes(plain.get_data()) != bytes(troubled.get_data()), state
+
+    @pytest.mark.parametrize("state", icons.BADGED_STATES)
+    def test_the_dot_is_in_the_state_colour(self, state):
+        """Sample the dot's centre and check its hue against STATE_COLORS."""
+        rendered = icons.tray_surface_for_state(state, 22)
+        size = 22
+        outer = size * icons.DOT_OUTER
+        centre = int(size - outer - size * 0.05)
+        r, g, b, a = pixel_at(rendered, centre, centre)
+        expected = [round(channel * 255) for channel in icons.STATE_COLORS[state]]
+        assert a == 255, f"{state}: dot centre is transparent"
+        assert (r, g, b) == pytest.approx(tuple(expected), abs=8), state
+
+    def test_valid_has_no_dot_in_the_corner(self):
+        """The corner must be untouched artwork, not merely a different colour."""
+        rendered = icons.tray_surface_for_state("valid", 22)
+        source = cairo.ImageSurface.create_from_png(str(icons.app_icon_path(22)))
+        size = 22
+        outer = size * icons.DOT_OUTER
+        centre = int(size - outer - size * 0.05)
+        # Where a troubled state paints the dot, a healthy one still shows the
+        # artwork pixel for pixel.
+        assert pixel_at(rendered, centre, centre) == pixel_at(source, centre, centre)
+
+    def test_states_are_distinguishable_from_each_other(self):
+        rendered = {
+            state: bytes(icons.tray_surface_for_state(state, 22).get_data())
+            for state in icons.STATE_COLORS
+        }
+        assert len(set(rendered.values())) == len(rendered)
+
+
+class TestMissingIconFallsBack:
+    """A broken icon set must degrade to the old plate, not to a blank square."""
+
+    def test_absent_icon_falls_back_to_the_plate(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("KRBCTL_ICON_PATH", str(tmp_path / "nope.png"))
+        icons.clear_icon_cache()
+        assert icons.app_icon_path(22) is None
+
+        fallback = icons.tray_surface_for_state("valid", 22)
+        plate = icons.surface_for_state("valid", 22)
+        assert bytes(fallback.get_data()) == bytes(plate.get_data())
+
+    def test_fallback_still_shows_the_state(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("KRBCTL_ICON_PATH", str(tmp_path / "nope.png"))
+        icons.clear_icon_cache()
+        valid = bytes(icons.tray_surface_for_state("valid", 22).get_data())
+        expired = bytes(icons.tray_surface_for_state("expired", 22).get_data())
+        assert valid != expired
+
+    def test_a_corrupt_png_also_falls_back(self, monkeypatch, tmp_path):
+        broken = tmp_path / "krbctl.png"
+        broken.write_bytes(b"not a png")
+        monkeypatch.setenv("KRBCTL_ICON_PATH", str(broken))
+        icons.clear_icon_cache()
+
+        rendered = icons.tray_surface_for_state("valid", 22)
+        plate = icons.surface_for_state("valid", 22)
+        assert bytes(rendered.get_data()) == bytes(plate.get_data())
+
+
+class TestWindowKeepsThePlate:
+    """Row badges in the window stay solid colour: they sit next to a name."""
+
+    def test_gdk_pixbuf_is_still_the_plate(self):
+        pixbuf = icons.gdk_pixbuf_for_state("valid", 20)
+        assert (pixbuf.get_width(), pixbuf.get_height()) == (20, 20)
+        rgba = bytes(pixbuf.get_pixels())
+        row = pixbuf.get_rowstride()
+        # Centre pixel of a plate is the state green, not artwork.
+        index = 10 * row + 10 * 4
+        r, g, b = rgba[index], rgba[index + 1], rgba[index + 2]
+        expected = [round(channel * 255) for channel in icons.STATE_COLORS["valid"]]
+        assert (r, g, b) == pytest.approx(tuple(expected), abs=8)
 
 
 class TestLauncherIconSet:
