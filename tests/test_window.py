@@ -121,14 +121,31 @@ def _application():
     return _app
 
 
-def _page_children(window):
-    """How many widgets are really attached to the page's internal box."""
-    box = window._empty_group.get_parent()
-    count, child = 0, box.get_first_child()
-    while child is not None:
-        count += 1
-        child = child.get_next_sibling()
-    return count
+def _groups_in(widget):
+    """Every PreferencesGroup under a widget, in document order.
+
+    Walks rather than assuming a shape: AdwPreferencesPage nests its groups
+    inside a ScrolledWindow and an internal box, so get_first_child() does not
+    hand back the groups directly.
+    """
+    found = []
+
+    def walk(node):
+        if isinstance(node, Adw.PreferencesGroup):
+            found.append(node)
+            return
+        child = node.get_first_child()
+        while child is not None:
+            walk(child)
+            child = child.get_next_sibling()
+
+    walk(widget)
+    return found
+
+
+def _page_children(window, page=None):
+    """How many section groups are attached to a page."""
+    return len(_groups_in(page or window._tickets_page))
 
 
 @pytest.fixture
@@ -174,28 +191,96 @@ def test_rebuild_does_not_accumulate_groups(main_window):
     assert len(main_window._groups) == len(main_window.store.accounts)
 
 
-def _section_titles(window):
-    """Titles of every PreferencesGroup attached to the page, in order."""
-    box = window._empty_group.get_parent()
-    titles, child = [], box.get_first_child()
-    while child is not None:
-        if isinstance(child, Adw.PreferencesGroup):
-            titles.append(child.get_title())
-        child = child.get_next_sibling()
-    return titles
+def _section_titles(window, page=None):
+    """Titles of every PreferencesGroup on a page, in order."""
+    return [group.get_title() or "" for group in _groups_in(page or window._tickets_page)]
 
 
 def test_rebuild_keeps_exactly_one_of_each_section(main_window):
-    """One account, one Domain, one Startup — however many times we rebuild."""
+    """One account row per account, however many times we rebuild."""
     main_window.rebuild()
     main_window.rebuild()
     main_window.rebuild()
 
     titles = _section_titles(main_window)
-    assert titles.count("Domain") == 1, titles
-    assert titles.count("Startup") == 1, titles
     assert titles.count("REALM") == 1, titles
     assert len(main_window._groups) == 1
+
+
+class TestTabs:
+    """Tickets / Domain join / Options, each owning its own page."""
+
+    def test_three_tabs_in_order(self, main_window):
+        pages = main_window._stack.get_pages()
+        names = [pages.get_item(i).get_name() for i in range(pages.get_n_items())]
+        assert names == ["tickets", "domain", "options"]
+
+    def test_tab_titles_are_the_expected_words(self, main_window):
+        pages = main_window._stack.get_pages()
+        titles = [pages.get_item(i).get_title() for i in range(pages.get_n_items())]
+        assert titles == ["Tickets", "Domain join", "Options"]
+
+    def test_every_tab_has_an_icon_that_resolves(self, main_window):
+        """A page with no icon makes ViewSwitcher draw the image-missing glyph."""
+        from gi.repository import Gdk
+
+        theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+        pages = main_window._stack.get_pages()
+        for index in range(pages.get_n_items()):
+            page = pages.get_item(index)
+            icon = page.get_icon_name()
+            assert icon, f"tab {page.get_name()!r} has no icon"
+            assert theme.has_icon(icon), f"icon {icon!r} does not resolve"
+
+    def test_accounts_land_on_the_tickets_tab(self, main_window):
+        assert "REALM" in _section_titles(main_window, main_window._tickets_page)
+
+    def test_domain_row_lives_on_the_domain_tab(self, main_window):
+        assert main_window._domain_group.get_parent() is not None
+        # It is on the domain page, not the tickets page.
+        assert "Domain" not in _section_titles(main_window, main_window._tickets_page)
+        assert main_window._domain_row.get_title()
+
+    def test_startup_row_lives_on_the_options_tab(self, main_window):
+        assert "Startup" in _section_titles(main_window, main_window._options_page)
+        assert "Startup" not in _section_titles(main_window, main_window._tickets_page)
+
+    def test_domain_and_options_are_not_duplicated_by_rebuild(self, main_window):
+        """They are built once; rebuild must never append a second copy."""
+        before = _page_children(main_window, main_window._domain_page)
+        for _ in range(3):
+            main_window.rebuild()
+        assert _page_children(main_window, main_window._domain_page) == before
+
+    def test_add_button_switches_to_tickets_first(self, main_window):
+        """So a new account appears where the user can see it."""
+        main_window._stack.set_visible_child_name("options")
+        main_window.open_editor = lambda account: None  # type: ignore[assignment]
+        main_window._on_add_clicked(Gtk.Button())
+        assert main_window._stack.get_visible_child_name() == "tickets"
+
+    def test_options_switches_reflect_stored_prefs(self, main_window):
+        main_window.store.prefs.notify = False
+        main_window.store.prefs.auto_renew_global = False
+        main_window.rebuild()
+        assert main_window._notify_row.get_active() is False
+        assert main_window._renew_row.get_active() is False
+
+    def test_toggling_a_pref_persists_it(self, main_window):
+        main_window._notify_row.set_active(False)
+        assert main_window.store.prefs.notify is False
+        saved = config.Store(path=main_window.store.path).load()
+        assert saved.prefs.notify is False
+
+    def test_failed_save_puts_the_switch_back(self, main_window):
+        """A flipped switch with an unwritten file would misreport behaviour."""
+        def boom():
+            raise OSError(28, "No space left on device")
+
+        main_window.store.save = boom  # type: ignore[assignment]
+        main_window._notify_row.set_active(False)
+        assert main_window.store.prefs.notify is True, "pref should be reverted"
+        assert main_window._notify_row.get_active() is True, "switch should be reverted"
 
 
 def test_duplicate_accounts_are_deduplicated_on_load(tmp_path):

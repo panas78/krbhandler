@@ -97,6 +97,17 @@ PyGObject routinely cannot see them.
 
 ## Use
 
+The window has three tabs:
+
+| Tab | What is on it |
+|---|---|
+| **Tickets** | one section per account: state badge, details, renew / sign in, destroy, remove |
+| **Domain join** | `Not joined` with the missing package names, or the realm you are joined to with its login policy, plus the Join… / Leave button |
+| **Options** | start at login, automatic renewal, and desktop notifications |
+
+Options writes straight to `accounts.json`, so the poller and the tray pick a
+change up immediately — no restart.
+
 ```bash
 krbctl gui                   # open the window
 krbctl tray                  # tray icon in the foreground

@@ -525,6 +525,8 @@ class MainWindow(Adw.ApplicationWindow):
         # duplicate stuck on "Reading ticket...". A list cannot lose an entry.
         self._groups: list[tuple[str, Adw.PreferencesGroup]] = []
         self._empty_rows: list[Gtk.Widget] = []
+        self._syncing_startup = False
+        self._syncing_options = False
 
         self._toasts = Adw.ToastOverlay()
         toolbar = Adw.ToolbarView()
@@ -534,7 +536,7 @@ class MainWindow(Adw.ApplicationWindow):
         header = Adw.HeaderBar()
         add_button = Gtk.Button(icon_name="list-add-symbolic")
         add_button.set_tooltip_text("Add account")
-        add_button.connect("clicked", lambda *_: self.open_editor(None))
+        add_button.connect("clicked", self._on_add_clicked)
         header.pack_start(add_button)
 
         menu = Gio.Menu()
@@ -546,17 +548,52 @@ class MainWindow(Adw.ApplicationWindow):
         header.pack_end(menu_button)
         toolbar.add_top_bar(header)
 
-        self._page = Adw.PreferencesPage()
-        toolbar.set_content(self._page)
+        # Three tabs. Adw.ViewSwitcherTitle puts them in the header when the
+        # window is wide enough and turns into a bottom bar when it is not, so
+        # the same code works at either size.
+        self._stack = Adw.ViewStack()
+        self._switcher_title = Adw.ViewSwitcherTitle(title="Kerberos Tickets")
+        self._switcher_title.set_stack(self._stack)
+        header.set_title_widget(self._switcher_title)
 
+        self._switcher_bar = Adw.ViewSwitcherBar()
+        self._switcher_bar.set_stack(self._stack)
+        toolbar.add_bottom_bar(self._switcher_bar)
+        self._switcher_title.connect(
+            "notify::title-visible",
+            lambda *_args: self._switcher_bar.set_reveal(
+                self._switcher_title.get_title_visible()
+            ),
+        )
+
+        self._tickets_page = Adw.PreferencesPage()
         self._empty_group = Adw.PreferencesGroup()
-        self._page.add(self._empty_group)
+        self._tickets_page.add(self._empty_group)
+        # add_titled_with_icon rather than add_titled: a page with no icon makes
+        # Adw.ViewSwitcher draw the image-missing placeholder next to every tab.
+        self._stack.add_titled_with_icon(
+            self._tickets_page, "tickets", "Tickets", "channel-secure-symbolic"
+        )
 
-        # Built once and re-appended last by rebuild(), so it stays pinned to the
-        # bottom no matter how many accounts appear or disappear above it.
-        self._syncing_startup = False
-        self._startup_group = self._build_startup_group()
+        # Each of these is built once and lives on its own tab, so rebuild()
+        # only re-syncs them rather than detaching and re-adding.
         self._domain_group = self._build_domain_group()
+        self._domain_page = Adw.PreferencesPage()
+        self._domain_page.add(self._domain_group)
+        self._stack.add_titled_with_icon(
+            self._domain_page, "domain", "Domain join", "network-workgroup-symbolic"
+        )
+
+        self._startup_group = self._build_startup_group()
+        self._behaviour_group = self._build_behaviour_group()
+        self._options_page = Adw.PreferencesPage()
+        self._options_page.add(self._startup_group)
+        self._options_page.add(self._behaviour_group)
+        self._stack.add_titled_with_icon(
+            self._options_page, "options", "Options", "emblem-system-symbolic"
+        )
+
+        toolbar.set_content(self._stack)
 
         self._install_actions()
         self._apply_css()
@@ -642,8 +679,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.store.load()
         self.rebuild()
 
-    def _detach(self, widget: Gtk.Widget) -> None:
-        """Remove a widget from the page, but only if it is attached.
+    @staticmethod
+    def _detach(widget: Gtk.Widget, page: Adw.PreferencesPage) -> None:
+        """Remove a widget from ``page``, but only if it is attached.
 
         ``AdwPreferencesPage`` does not parent its children directly: ``add()``
         puts them inside an internal ``GtkBox``, so ``widget.get_parent()`` is
@@ -656,19 +694,17 @@ class MainWindow(Adw.ApplicationWindow):
         have are this page's internal box.
         """
         if widget.get_parent() is not None:
-            self._page.remove(widget)
+            page.remove(widget)
 
     def rebuild(self) -> None:
         for _account_id, group in self._groups:
-            self._detach(group)
+            self._detach(group, self._tickets_page)
         self._groups.clear()
         # AdwPreferencesGroup has no clear(); get_first_child() hands back its
         # internal box, not the rows, so the rows are tracked explicitly.
         for row in list(self._empty_rows):
             self._empty_group.remove(row)
         self._empty_rows.clear()
-        self._detach(self._startup_group)
-        self._detach(self._domain_group)
 
         if not self.store.accounts:
             self._empty_group.set_title("No accounts")
@@ -683,15 +719,19 @@ class MainWindow(Adw.ApplicationWindow):
             for account in self.store.accounts:
                 self._add_account_group(account)
 
-        self._page.add(self._domain_group)
-        self._page.add(self._startup_group)
+        # The Domain and Options tabs own their rows permanently, so there is
+        # nothing to re-add here -- only their contents to re-read.
         self._sync_startup_row()
+        self._sync_behaviour_rows()
         self._sync_domain_group()
 
     # ── domain ────────────────────────────────────────────────
 
     def _build_domain_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup(title="Domain")
+        group.set_description(
+            "This machine's Active Directory membership, and which accounts may sign in"
+        )
         self._domain_row = Adw.ActionRow(title="Active Directory")
         self._domain_action = Gtk.Button(label="Join…", valign=Gtk.Align.CENTER)
         self._domain_action.connect("clicked", self._on_domain_action)
@@ -791,9 +831,72 @@ class MainWindow(Adw.ApplicationWindow):
 
     # ── startup ───────────────────────────────────────────────
 
+    def _on_add_clicked(self, _button: Gtk.Button) -> None:
+        """Add an account, from whichever tab the button was pressed on.
+
+        Switching to Tickets first means the new row appears in view instead of
+        silently landing on a tab the user is not looking at.
+        """
+        self._stack.set_visible_child_name("tickets")
+        self.open_editor(None)
+
+    def _build_behaviour_group(self) -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(title="Tickets")
+        group.set_description("How tickets are renewed and reported")
+        self._renew_row = Adw.SwitchRow(
+            title="Renew automatically",
+            subtitle="Refresh tickets from a keytab before they expire",
+        )
+        self._renew_row.connect("notify::active", self._on_renew_pref_toggled)
+        group.add(self._renew_row)
+
+        self._notify_row = Adw.SwitchRow(
+            title="Notify when a ticket needs attention",
+            subtitle="A desktop notification as a ticket approaches expiry",
+        )
+        self._notify_row.connect("notify::active", self._on_notify_pref_toggled)
+        group.add(self._notify_row)
+        return group
+
+    def _sync_behaviour_rows(self) -> None:
+        """Point both switches at the stored preferences."""
+        self._syncing_options = True
+        try:
+            self._renew_row.set_active(self.store.prefs.auto_renew_global)
+            self._notify_row.set_active(self.store.prefs.notify)
+        finally:
+            self._syncing_options = False
+
+    def _save_pref(self, name: str, value: bool) -> None:
+        """Write one preference, putting the switch back if the save fails.
+
+        A switch that stays flipped after a failed write is a lie: the next poll
+        would still use the old value. Reverting keeps the UI and the file in
+        agreement.
+        """
+        if self._syncing_options:
+            return
+        previous = getattr(self.store.prefs, name)
+        setattr(self.store.prefs, name, value)
+        try:
+            self.store.save()
+        except OSError as exc:
+            setattr(self.store.prefs, name, previous)
+            self._sync_behaviour_rows()
+            self.toast(f"Could not save settings: {exc.strerror or exc}")
+            return
+        self.toast("Setting saved")
+
+    def _on_renew_pref_toggled(self, row: Adw.SwitchRow, _pspec) -> None:
+        self._save_pref("auto_renew_global", row.get_active())
+
+    def _on_notify_pref_toggled(self, row: Adw.SwitchRow, _pspec) -> None:
+        self._save_pref("notify", row.get_active())
+
     def _build_startup_group(self) -> Adw.PreferencesGroup:
         group = Adw.PreferencesGroup()
         group.set_title("Startup")
+        group.set_description("What happens when you log in")
         self._startup_row = Adw.SwitchRow(
             title="Start at login",
             subtitle="Show the ticket state in the bar without opening this window",
@@ -894,7 +997,7 @@ class MainWindow(Adw.ApplicationWindow):
         remove.add_suffix(remove_button)
         group.add(remove)
 
-        self._page.add(group)
+        self._tickets_page.add(group)
         self._groups.append((account.id, group))
 
         # Stash the widgets that the poller updates.
