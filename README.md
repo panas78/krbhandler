@@ -1,3 +1,5 @@
+# Disclaimer: This project mostly ai generated.
+
 # krbctl — Kerberos Handler for the Linux desktop
 
 A tray icon and a native GTK4 window for MIT Kerberos. It answers the two
